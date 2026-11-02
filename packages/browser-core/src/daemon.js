@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import net from 'node:net';
 import { chromium } from 'playwright';
+import { chooseBrowser } from './browsers.js';
 
 const DIR = process.env.BROWSER_CORE_HOME || join(homedir(), '.browser-core');
 const STATE = join(DIR, 'session.json');
@@ -24,11 +25,16 @@ const freePort = () => new Promise((res, rej) => {
 async function main() {
   const token = randomBytes(24).toString('hex');
   const cdpPort = await freePort();
-  const context = await chromium.launchPersistentContext(join(DIR, 'profile'), {
+  const launch = (opts) => chromium.launchPersistentContext(join(DIR, 'profile'), {
+    ...opts,
     headless: process.env.BROWSER_CORE_HEADLESS === '1',
     viewport: null,
-    args: [`--remote-debugging-port=${cdpPort}`, '--remote-debugging-address=127.0.0.1', '--no-first-run'],
+    args: [`--remote-debugging-port=${cdpPort}`, '--remote-debugging-address=127.0.0.1', '--no-first-run', '--no-default-browser-check'],
   });
+  const pick = chooseBrowser();
+  let context;
+  try { context = await launch(pick.opts); log('browser', pick.label); }
+  catch (e) { log('browser', pick.label, 'failed, falling back to bundled chromium:', e.message.split('\n')[0]); context = await launch({}); }
   let cdpUrl = null;
   for (let i = 0; i < 50 && !cdpUrl; i++) {
     try {

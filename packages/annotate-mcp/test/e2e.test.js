@@ -19,7 +19,7 @@ test('annotate loop', { timeout: 90000 }, async () => {
   const project = mkdtempSync(join(tmpdir(), 'proj-'));
   process.env.BROWSER_CORE_HOME = home;
   process.env.BROWSER_CORE_HEADLESS = '1';
-  const site = createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.end(HTML); }).listen(0);
+  const site = createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.setHeader('content-security-policy', "require-trusted-types-for 'script'"); r.end(HTML); }).listen(0);
   const url = `http://127.0.0.1:${site.address().port}/`;
 
   const client = new Client({ name: 'test', version: '0' });
@@ -36,7 +36,7 @@ test('annotate loop', { timeout: 90000 }, async () => {
     assert.deepEqual(tools, ['get_annotation_details', 'open', 'resolve_annotation', 'wait_for_feedback']);
 
     assert.equal((await call('open', { url })).json.ok, true);
-    assert.deepEqual((await call('wait_for_feedback', { timeout_sec: 10 })).json, { status: 'waiting' });
+    assert.equal((await call('wait_for_feedback', { timeout_sec: 10 })).json.status, 'waiting');
 
     // Act as the human in the same shared browser.
     const { browser, context } = await connect();
@@ -57,6 +57,7 @@ test('annotate loop', { timeout: 90000 }, async () => {
     assert.equal(a.comment, 'Make this more minimal');
     assert.equal(a.selector, '#cta');
     assert.equal(a.source, 'src/Hero.tsx:12');
+    assert.equal(a.element_text, 'Go', 'element text always included');
     assert.ok(existsSync(join(project, a.screenshot)), 'screenshot saved');
     assert.equal(images.length, 0, 'no image for non-visual comment');
     assert.ok(JSON.stringify(json).length / 4 < 500, 'within token budget');
@@ -66,9 +67,20 @@ test('annotate loop', { timeout: 90000 }, async () => {
     assert.equal(det.images.length, 1);
 
     assert.match(readFileSync(join(project, '.annotate/ANNOTATIONS.md'), 'utf8'), /more minimal/);
-    const res = await call('resolve_annotation', { ids: [a.id] });
-    assert.deepEqual(res.json.resolved, [a.id]);
-    assert.equal(res.json.open, 0);
+    // resolve now keeps the loop alive: it waits for the next round itself.
+    const next = call('resolve_annotation', { ids: [a.id], timeout_sec: 60 });
+    await new Promise((r) => setTimeout(r, 1500)); // page reloads after resolve
+    await page.keyboard.press('Alt+Shift+A');
+    await page.click('h1', { force: true });
+    await page.keyboard.type('Bigger headline');
+    await page.keyboard.press('Control+Enter');
+    await page.keyboard.press('Alt+Shift+S');
+    const res = (await next).json;
+    assert.deepEqual(res.resolved, [a.id]);
+    assert.equal(res.annotations[0].comment, 'Bigger headline');
+    assert.equal(res.errors, undefined, 'toolbar must not throw (Trusted Types page)');
+    const fin = await call('resolve_annotation', { ids: [res.annotations[0].id], wait: false });
+    assert.equal(fin.json.open, 0);
     await browser.close().catch(() => {});
   } finally {
     await client.close();

@@ -12,6 +12,12 @@
   let sent = [];                // [{id, n, selector, comment, state}] from server
   const elRefs = new Map();     // n -> element (fast path while still in DOM)
 
+  function h(tag, attrs = {}, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    for (const k of kids) if (k != null) el.append(k);
+    return el;
+  }
   function load() { try { return JSON.parse(sessionStorage.getItem(KEY)) || []; } catch { return []; } }
   function persist() { try { sessionStorage.setItem(KEY, JSON.stringify(drafts)); } catch {} }
   const call = (msg) => (window.__annotate_send ? window.__annotate_send(msg) : Promise.reject(new Error('Annotate server not connected')));
@@ -104,11 +110,17 @@
   function mount() {
     host = document.createElement('annotate-toolbar');
     root = host.attachShadow({ mode: 'closed' });
-    root.innerHTML = `<style>${CSS_TEXT}</style><div class="layer"></div><div class="hl"><span class="tag"></span></div>
-      <div class="bar"><span class="dot" title="Agent status"></span>
-      <button class="toggle" title="Alt+Shift+A">Annotate</button><button class="go" title="Alt+Shift+S" disabled>Send to AI</button></div>`;
-    ui = { layer: root.querySelector('.layer'), hl: root.querySelector('.hl'), tag: root.querySelector('.tag'),
-      toggle: root.querySelector('.toggle'), go: root.querySelector('.go'), dot: root.querySelector('.dot') };
+    // Built with DOM calls, not innerHTML, so pages with Trusted Types / strict CSP still work.
+    const style = h('style'); style.textContent = CSS_TEXT;
+    ui = {
+      layer: h('div', { class: 'layer' }),
+      tag: h('span', { class: 'tag' }),
+      dot: h('span', { class: 'dot', title: 'Agent status' }),
+      toggle: h('button', { class: 'toggle', title: 'Alt+Shift+A' }, 'Annotate'),
+      go: h('button', { class: 'go', title: 'Alt+Shift+S', disabled: '' }, 'Send to AI'),
+    };
+    ui.hl = h('div', { class: 'hl' }, ui.tag);
+    root.append(style, ui.layer, ui.hl, h('div', { class: 'bar' }, ui.dot, ui.toggle, ui.go));
     ui.toggle.onclick = () => setActive(!active);
     ui.go.onclick = sendAll;
     document.documentElement.appendChild(host);
@@ -128,10 +140,10 @@
     document.documentElement.style.cursor = on ? 'crosshair' : '';
   }
 
-  function setStatus(s) { status = s; ui.dot.className = 'dot ' + s; ui.dot.title = 'Agent: ' + s; }
+  function setStatus(s) { status = s; if (!ui.dot) return; ui.dot.className = 'dot ' + s; ui.dot.title = 'Agent: ' + s; }
 
   let raf = 0;
-  function render() { cancelAnimationFrame(raf); raf = requestAnimationFrame(draw); }
+  function render() { if (!ui.layer) return; cancelAnimationFrame(raf); raf = requestAnimationFrame(draw); }
   function draw() {
     const pins = [...drafts.map((d) => ({ ...d, state: 'draft' })), ...sent.filter((s) => s.path === location.pathname)];
     ui.layer.textContent = '';
@@ -163,14 +175,15 @@
     const r = el.getBoundingClientRect();
     const pop = document.createElement('div');
     pop.className = 'pop';
-    pop.innerHTML = `<textarea placeholder="What should change?"></textarea><div class="row">
-      <span class="hint">Ctrl+Enter to save</span>${existing ? '<button class="del">Delete</button>' : ''}
-      <button class="cancel">Cancel</button><button class="save go">Save</button></div>`;
+    const ta = h('textarea', { placeholder: 'What should change?' });
+    const saveBtn = h('button', { class: 'save go' }, 'Save');
+    const cancelBtn = h('button', { class: 'cancel' }, 'Cancel');
+    const del = existing ? h('button', { class: 'del' }, 'Delete') : null;
+    pop.append(ta, h('div', { class: 'row' }, h('span', { class: 'hint' }, 'Ctrl+Enter to save'), del, cancelBtn, saveBtn));
     const top = Math.min(innerHeight - 150, Math.max(8, r.bottom + 8));
     const left = Math.min(innerWidth - 290, Math.max(8, r.left));
     Object.assign(pop.style, { top: top + 'px', left: left + 'px' });
     root.appendChild(pop);
-    const ta = pop.querySelector('textarea');
     ta.value = existing?.comment || '';
     const save = () => {
       const comment = ta.value.trim();
@@ -183,9 +196,8 @@
       }
       persist(); closePopover(); render();
     };
-    pop.querySelector('.save').onclick = save;
-    pop.querySelector('.cancel').onclick = closePopover;
-    const del = pop.querySelector('.del');
+    saveBtn.onclick = save;
+    cancelBtn.onclick = closePopover;
     if (del) del.onclick = () => { drafts = drafts.filter((d) => d.n !== existing.n); persist(); closePopover(); render(); };
     ta.addEventListener('keydown', (e) => {
       e.stopPropagation();
@@ -245,7 +257,7 @@
 
   window.__annotate = {
     setStatus: (s) => host && setStatus(s),
-    sync: applySync,
+    sync: (r) => { if (r) { sent = r.open || []; status = r.status || status; } if (host) applySync(r); },
     hide: (h) => { if (host) host.style.display = h ? 'none' : ''; },
   };
   if (document.documentElement) mount(); else document.addEventListener('DOMContentLoaded', mount, { once: true });

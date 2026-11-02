@@ -62,14 +62,23 @@ Without this, the agent searches by text and class names. With it, each element 
 ## Token efficiency (by design)
 
 - Only 4 tools with one-line descriptions. Longer guidance lives in `SKILL.md`.
-- `wait_for_feedback` returns a small summary (~40 tokens per annotation): comment, selector, source, or a short text snippet.
+- `wait_for_feedback` returns a small summary (~40 tokens per annotation): comment, selector, source, and the element's text.
   HTML, styles, and screenshots come from `get_annotation_details` only on request.
 - Screenshots are cropped to the element, capped at 1200×900 CSS px, saved as JPEG on disk, and returned only as a path.
   An image is attached automatically only when the comment sounds visual ("misaligned", "spacing", "color"…).
 - Waiting blocks quietly (default 300s) and sends progress pings so clients don't time out. On timeout it returns `{"status":"waiting"}`.
 - Resolved annotations are deleted and never come back. The queue persists in `.annotate/queue.json` and `.annotate/ANNOTATIONS.md`.
-- `resolve_annotation` returns new console errors, so checking a change costs almost nothing.
+- `resolve_annotation` reloads the page, returns new console errors, and then waits for the next round, so the loop never stalls.
 - Every result's size is logged to stderr. Anything over `ANNOTATE_TOKEN_BUDGET` (default 500) logs a warning.
+
+## Which browser?
+
+By default Annotate opens **your default browser** if it supports the Chrome DevTools Protocol:
+Chrome, Edge, Brave, Chromium, Vivaldi, or Opera (Linux, Windows, macOS). Firefox and Safari don't support it,
+so Annotate falls back to the bundled Chromium. Override this with `BROWSER_CORE_BROWSER` (see the table below).
+
+Annotate uses its own browser profile (`~/.browser-core/profile`), not your everyday one. Chrome blocks automation on your main profile,
+so log in once in the Annotate window and it remembers you from then on.
 
 ## browser-core
 
@@ -83,4 +92,5 @@ Closing the browser stops the daemon, and the next `open` relaunches it.
 | `ANNOTATE_PROJECT_DIR` | project root for `.annotate/` and relative source paths |
 | `ANNOTATE_TOKEN_BUDGET` | warning threshold, default 500 |
 | `BROWSER_CORE_HOME` | state and profile dir, default `~/.browser-core` |
+| `BROWSER_CORE_BROWSER` | `default` (auto), `bundled`, `chrome`, `msedge`, `brave`, `vivaldi`, `chromium`, `opera`, or a path to the browser executable |
 | `BROWSER_CORE_HEADLESS=1` | headless (CI/tests) |

@@ -39,7 +39,7 @@ async function ensureBrowser() {
   conn.browser.on('disconnected', () => { conn = null; });
   return conn;
 }
-function pushErr(t) { consoleErrors.push(t.slice(0, 200)); if (consoleErrors.length > 20) consoleErrors.shift(); }
+function pushErr(t) { if (/\[annotate\]|__annotate/.test(t)) return; consoleErrors.push(t.slice(0, 200)); if (consoleErrors.length > 20) consoleErrors.shift(); }
 function takeErrors() { const e = [...new Set(consoleErrors.splice(0))].slice(-5); return e.length ? e : undefined; }
 
 function toolbarState() {
@@ -103,7 +103,8 @@ async function onToolbar(page, msg) {
 const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : s);
 function summary(a) {
   const o = { id: a.id, comment: a.comment, url: a.path, selector: a.selector };
-  if (a.source) o.source = a.source; else if (a.text) o.text = clip(a.text, 80);
+  if (a.source) o.source = a.source;
+  if (a.text) o.element_text = clip(a.text, 80);
   if (a.screenshot) o.screenshot = a.screenshot;
   return o;
 }
@@ -139,11 +140,7 @@ server.registerTool('open', {
   } catch (e) { return fail('open', e); }
 });
 
-server.registerTool('wait_for_feedback', {
-  description: 'Block until the user clicks "Send to AI". Returns pending annotations, or {status:"waiting"} on timeout (then call again).',
-  inputSchema: { timeout_sec: z.number().int().min(10).max(3600).optional().describe('default 300') },
-}, async ({ timeout_sec = 300 }, extra) => {
-  try { await ensureBrowser(); } catch (e) { return fail('wait_for_feedback', e); }
+async function waitForFeedback(tool, timeout_sec, extra) {
   let items = queue.undelivered();
   if (!items.length) {
     setStatus('waiting');
@@ -163,11 +160,23 @@ server.registerTool('wait_for_feedback', {
     clearInterval(beat);
     items = queue.undelivered();
   }
-  if (!items.length) { setStatus('idle'); return reply('wait_for_feedback', { status: 'waiting' }); }
+  if (!items.length) { setStatus('idle'); return null; }
   queue.markDelivered(items);
   setStatus('working');
   const images = items.filter((a) => a.screenshot && VISUAL.test(a.comment)).slice(0, 3).map(imageBlock).filter(Boolean);
-  return reply('wait_for_feedback', { annotations: items.map(summary) }, images);
+  return { annotations: items.map(summary), images };
+}
+
+const LOOP = 'Feedback only arrives while you are inside wait_for_feedback/resolve_annotation; never end your turn while the user is annotating.';
+
+server.registerTool('wait_for_feedback', {
+  description: `Block until the user clicks "Send to AI"; returns their annotations. On {status:"waiting"} call again. ${LOOP}`,
+  inputSchema: { timeout_sec: z.number().int().min(10).max(3600).optional().describe('default 300') },
+}, async ({ timeout_sec = 300 }, extra) => {
+  try { await ensureBrowser(); } catch (e) { return fail('wait_for_feedback', e); }
+  const r = await waitForFeedback('wait_for_feedback', timeout_sec, extra);
+  if (!r) return reply('wait_for_feedback', { status: 'waiting', next: 'call wait_for_feedback again' });
+  return reply('wait_for_feedback', { annotations: r.annotations }, r.images);
 });
 
 server.registerTool('get_annotation_details', {
@@ -187,9 +196,14 @@ server.registerTool('get_annotation_details', {
 });
 
 server.registerTool('resolve_annotation', {
-  description: 'Mark annotations done after editing the code. Returns new console errors, if any.',
-  inputSchema: { ids: z.array(z.string()).min(1), note: z.string().max(300).optional() },
-}, async ({ ids, note }) => {
+  description: `Mark annotations done after editing, reload the page, then (by default) wait for the next round, returning it like wait_for_feedback. ${LOOP}`,
+  inputSchema: {
+    ids: z.array(z.string()).min(1),
+    note: z.string().max(300).optional(),
+    wait: z.boolean().optional().describe('default true'),
+    timeout_sec: z.number().int().min(10).max(3600).optional().describe('default 300'),
+  },
+}, async ({ ids, note, wait = true, timeout_sec = 300 }, extra) => {
   const opened = new Map(queue.open().map((a) => [a.id, a]));
   const done = queue.resolve(ids, note);
   recentDone = done.map((id) => {
@@ -197,9 +211,16 @@ server.registerTool('resolve_annotation', {
     return { id, n, selector, comment, path, state: 'done' };
   });
   setTimeout(() => { recentDone = []; broadcast(); }, 8000);
-  if (!queue.open().length) setStatus('idle'); else broadcast();
-  await new Promise((r) => setTimeout(r, 400)); // let hot reload surface errors
-  return reply('resolve_annotation', { resolved: done, open: queue.open().length, errors: takeErrors() });
+  // Reload annotated tabs so the user sees the new code even when hot reload is broken.
+  const urls = new Set(done.map((id) => opened.get(id).url));
+  if (conn) await Promise.all(conn.context.pages().filter((p) => urls.has(p.url()))
+    .map((p) => p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})));
+  await new Promise((r) => setTimeout(r, 400)); // let errors surface
+  const out = { resolved: done, open: queue.open().length, errors: takeErrors() };
+  if (!wait) { if (!out.open) setStatus('idle'); else broadcast(); return reply('resolve_annotation', out); }
+  const r = await waitForFeedback('resolve_annotation', timeout_sec, extra);
+  if (!r) return reply('resolve_annotation', { ...out, status: 'waiting', next: 'call wait_for_feedback' });
+  return reply('resolve_annotation', { ...out, annotations: r.annotations }, r.images);
 });
 
 const transport = new StdioServerTransport();
