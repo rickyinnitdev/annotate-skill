@@ -1,0 +1,78 @@
+// End-to-end: real MCP client -> annotate-mcp -> browser-core daemon -> Chromium (headless).
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { mkdtempSync, existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { connect, ensureSession, shutdown } from 'browser-core';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const HTML = `<!doctype html><html><body><section class="hero" data-source="src/Hero.tsx:12">
+<h1>We build digital experiences.</h1><a id="cta" href="/gone" onclick="window.clicked=1">Go</a></section></body></html>`;
+
+test('annotate loop', { timeout: 90000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), 'bc-'));
+  const project = mkdtempSync(join(tmpdir(), 'proj-'));
+  process.env.BROWSER_CORE_HOME = home;
+  process.env.BROWSER_CORE_HEADLESS = '1';
+  const site = createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.end(HTML); }).listen(0);
+  const url = `http://127.0.0.1:${site.address().port}/`;
+
+  const client = new Client({ name: 'test', version: '0' });
+  await client.connect(new StdioClientTransport({
+    command: process.execPath, args: [join(here, '../src/server.js')],
+    env: { ...process.env, ANNOTATE_PROJECT_DIR: project }, stderr: 'inherit',
+  }));
+  const call = async (name, args) => {
+    const r = await client.callTool({ name, arguments: args }, undefined, { timeout: 60000 });
+    return { json: JSON.parse(r.content[0].text), images: r.content.filter((c) => c.type === 'image') };
+  };
+  try {
+    const tools = (await client.listTools()).tools.map((t) => t.name).sort();
+    assert.deepEqual(tools, ['get_annotation_details', 'open', 'resolve_annotation', 'wait_for_feedback']);
+
+    assert.equal((await call('open', { url })).json.ok, true);
+    assert.deepEqual((await call('wait_for_feedback', { timeout_sec: 10 })).json, { status: 'waiting' });
+
+    // Act as the human in the same shared browser.
+    const { browser, context } = await connect();
+    const page = context.pages().find((p) => p.url() === url);
+    const waiting = call('wait_for_feedback', { timeout_sec: 60 });
+    await page.keyboard.press('Alt+Shift+A');
+    await page.click('#cta', { force: true });
+    assert.equal(await page.evaluate(() => window.clicked), undefined, 'page click must be blocked');
+    assert.equal(page.url(), url, 'link must not navigate');
+    await page.keyboard.type('Make this more minimal');
+    await page.keyboard.press('Control+Enter');
+    await page.mouse.move(200, 30);
+    await page.keyboard.press('Alt+Shift+S');
+
+    const { json, images } = await waiting;
+    const a = json.annotations[0];
+    assert.equal(json.annotations.length, 1);
+    assert.equal(a.comment, 'Make this more minimal');
+    assert.equal(a.selector, '#cta');
+    assert.equal(a.source, 'src/Hero.tsx:12');
+    assert.ok(existsSync(join(project, a.screenshot)), 'screenshot saved');
+    assert.equal(images.length, 0, 'no image for non-visual comment');
+    assert.ok(JSON.stringify(json).length / 4 < 500, 'within token budget');
+
+    const det = await call('get_annotation_details', { id: a.id, fields: ['html', 'styles', 'screenshot'] });
+    assert.match(det.json.html, /id="cta"/);
+    assert.equal(det.images.length, 1);
+
+    assert.match(readFileSync(join(project, '.annotate/ANNOTATIONS.md'), 'utf8'), /more minimal/);
+    const res = await call('resolve_annotation', { ids: [a.id] });
+    assert.deepEqual(res.json.resolved, [a.id]);
+    assert.equal(res.json.open, 0);
+    await browser.close().catch(() => {});
+  } finally {
+    await client.close();
+    await shutdown(await ensureSession()).catch(() => {});
+    site.close();
+  }
+});
