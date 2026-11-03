@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { startHarness, jpegSize } from './harness.js';
 
 const HTML = `<!doctype html><html><head><style>body { margin: 0; height: 2400px }</style></head><body>
-<section class="card" data-source="src/Card.tsx:4" style="position:absolute;top:900px;left:100px;width:300px;height:200px;background:#eee">Card</section>
+<section class="card" data-source="src/Card.tsx:4" style="position:absolute;top:900px;left:100px;width:300px;height:200px;background:#eee">Card
+<button class="cta" data-source="src/Card.tsx:9" style="position:absolute;left:10px;top:10px;width:80px;height:50px">Buy</button></section>
+<script>window.docClicks = 0; document.addEventListener('click', () => window.docClicks++);</script>
 </body></html>`;
 
 const drag = async (page, [x1, y1], [x2, y2]) => {
@@ -42,7 +44,7 @@ test('draw mode and app snapshots', { timeout: 240000 }, async (t) => {
     });
 
     await t.test('draw circle over element while scrolled', async () => {
-      await page.evaluate(() => scrollTo(0, 800));
+      await page.evaluate(() => scrollTo({ top: 800, behavior: 'instant' }));
       const waiting = h.call('wait_for_feedback', { timeout_sec: 60 });
       await page.keyboard.press('Alt+Shift+D');
       await drag(page, [120, 120], [380, 260]);
@@ -61,15 +63,51 @@ test('draw mode and app snapshots', { timeout: 240000 }, async (t) => {
       assert.equal(images.length, 1, 'drawings always attach their image');
       assert.ok(JSON.stringify(json).length / 4 < 500, 'within token budget');
       const det = (await h.call('get_annotation_details', { id: a.id, fields: ['under', 'box'] })).json;
-      assert.ok(Array.isArray(det.under));
+      assert.ok(det.under.some((u) => u.source === 'src/Card.tsx:9'), `button under the drawing is listed: ${JSON.stringify(det.under)}`);
+      assert.equal(await page.evaluate(() => window.docClicks), 0, 'drawing does not click the page');
       assert.ok(det.box.y >= 800, `box is in page coordinates (y=${det.box.y})`);
       assert.match(readFileSync(join(h.project, '.annotate/ANNOTATIONS.md'), 'utf8'), /\[drawing\]/);
       await h.call('resolve_annotation', { ids: [a.id], wait: false });
     });
 
+    await t.test('drawings stay on their own page', async () => {
+      await new Promise((r) => setTimeout(r, 1000)); // page reloads after resolve
+      await page.evaluate(() => scrollTo({ top: 0, behavior: 'instant' }));
+      await page.keyboard.press('Alt+Shift+D');
+      await drag(page, [20, 20], [90, 90]);
+      await page.keyboard.type('Only on home');
+      await page.keyboard.press('Control+Enter');
+      await page.evaluate(() => history.pushState({}, '', '/other'));
+      await page.keyboard.press('Alt+Shift+S');
+      assert.equal((await h.call('wait_for_feedback', { timeout_sec: 10 })).json.status, 'waiting', 'not sent from another page');
+      await page.evaluate(() => history.pushState({}, '', '/'));
+      const waiting = h.call('wait_for_feedback', { timeout_sec: 60 });
+      await page.keyboard.press('Alt+Shift+S');
+      const a = (await waiting).json.annotations[0];
+      assert.equal(a.comment, 'Only on home');
+      assert.equal(a.url, '/');
+      await h.call('resolve_annotation', { ids: [a.id], wait: false });
+    });
+
+    await t.test('smooth-scrolling page still gets a crop', async () => {
+      await new Promise((r) => setTimeout(r, 1000));
+      await page.evaluate(() => { document.documentElement.style.scrollBehavior = 'auto'; scrollTo(0, 0); });
+      await page.keyboard.press('Alt+Shift+D');
+      await drag(page, [150, 30], [260, 120]);
+      await page.keyboard.type('Smooth');
+      await page.keyboard.press('Control+Enter');
+      await page.evaluate(() => { scrollTo(0, 1400); document.documentElement.style.scrollBehavior = 'smooth'; });
+      const waiting = h.call('wait_for_feedback', { timeout_sec: 60 });
+      await page.keyboard.press('Alt+Shift+S');
+      const a = (await waiting).json.annotations[0];
+      assert.ok(a.screenshot, 'crop taken even with smooth scrolling');
+      await page.evaluate(() => { document.documentElement.style.scrollBehavior = 'auto'; });
+      await h.call('resolve_annotation', { ids: [a.id], wait: false });
+    });
+
     await t.test('drawing over empty space', async () => {
       await new Promise((r) => setTimeout(r, 1000)); // page reloads after resolve
-      await page.evaluate(() => scrollTo(0, 0));
+      await page.evaluate(() => scrollTo({ top: 0, behavior: 'instant' }));
       const waiting = h.call('wait_for_feedback', { timeout_sec: 60 });
       await page.keyboard.press('Alt+Shift+D');
       await drag(page, [20, 20], [90, 90]);

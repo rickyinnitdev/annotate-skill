@@ -121,9 +121,9 @@
     const centre = document.elementsFromPoint(cx - scrollX, cy - scrollY).filter((el) => !skip(el));
     const best = centre.sort((a, b) => area(a) - area(b))[0];
     const out = best ? [best] : [];
-    for (const [x, y] of pts) {
-      const el = document.elementFromPoint(x - scrollX, y - scrollY);
-      if (!skip(el) && !out.includes(el) && out.length < 4) out.push(el);
+    for (const [x, y] of pts) { // elementsFromPoint, not elementFromPoint: the drawing overlay covers the page
+      const el = document.elementsFromPoint(x - scrollX, y - scrollY).find((e) => !skip(e));
+      if (el && !out.includes(el) && out.length < 4) out.push(el);
     }
     return out;
   }
@@ -194,6 +194,8 @@
       preview: (sh) => { previewShape = sh; render(); },
       onDone: (sh) => openPopover(null, null, sh),
     });
+    // Drawing must not click the page (menus would close under the pen).
+    for (const t of ['click', 'dblclick', 'contextmenu', 'auxclick']) ui.ink.addEventListener(t, (e) => { e.preventDefault(); e.stopPropagation(); });
     ui.go.onclick = sendAll;
     document.documentElement.appendChild(host);
     // Frameworks sometimes wipe <html> children on hydration; re-attach if removed.
@@ -234,9 +236,10 @@
   let raf = 0;
   function render() { if (!ui.layer) return; cancelAnimationFrame(raf); raf = requestAnimationFrame(draw); }
   function draw() {
-    const pins = [...drafts.map((d) => ({ ...d, state: 'draft' })), ...sent.filter((s) => s.path === location.pathname)];
+    const here = (d) => d.kind !== 'draw' || d.path === location.pathname; // drawings belong to the page they were made on
+    const pins = [...drafts.filter(here).map((d) => ({ ...d, state: 'draft' })), ...sent.filter((s) => s.path === location.pathname)];
     ui.layer.textContent = '';
-    const shapes = [...drafts.filter((d) => d.kind === 'draw').flatMap((d) => d.shapes), pending, previewShape].filter(Boolean);
+    const shapes = [...drafts.filter((d) => d.kind === 'draw' && here(d)).flatMap((d) => d.shapes), pending, previewShape].filter(Boolean);
     if (shapes.length) {
       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
       svg.setAttribute('class', 'strokes');
@@ -258,8 +261,9 @@
       if (p.state === 'draft') pin.onclick = (e) => { e.stopPropagation(); openPopover(el, p); };
       ui.layer.appendChild(pin);
     }
-    ui.go.disabled = drafts.length === 0;
-    ui.go.textContent = drafts.length ? `Send to AI (${drafts.length})` : 'Send to AI';
+    const n = sendable().length;
+    ui.go.disabled = n === 0;
+    ui.go.textContent = n ? `Send to AI (${n})` : 'Send to AI';
   }
 
   function highlight(el) {
@@ -313,9 +317,11 @@
   }
   function closePopover() { editing?.remove(); editing = null; if (pending) { pending = null; render(); } }
 
+  const sendable = () => drafts.filter((d) => d.kind !== 'draw' || d.path === location.pathname);
   async function sendAll() {
-    if (!drafts.length) return;
-    const items = drafts.map((d) => {
+    const batch = sendable();
+    if (!batch.length) return;
+    const items = batch.map((d) => {
       if (d.kind === 'draw') {
         const [best, ...rest] = elementsUnder(d.box);
         return { n: d.n, kind: 'draw', comment: d.comment, path: d.path, box: d.box, shapes: d.shapes,
@@ -328,7 +334,7 @@
     ui.go.disabled = true; ui.go.textContent = 'Sending…';
     try {
       const res = await call({ type: 'send', url: location.href, path: location.pathname, items });
-      drafts = []; persist(); elRefs.clear(); applySync(res); setActive(false); setDrawing(false);
+      drafts = drafts.filter((d) => !batch.includes(d)); persist(); elRefs.clear(); applySync(res); setActive(false); setDrawing(false);
     } catch (e) {
       ui.go.textContent = 'Failed. Retry'; ui.go.disabled = false; console.warn('[annotate]', e);
     }

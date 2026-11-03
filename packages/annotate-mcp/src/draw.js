@@ -11,6 +11,8 @@ function shapeBox(shape) {
 }
 
 function isTiny(box) { return box.w < 6 && box.h < 6; }
+// A click without a real drag; uses the raw points, so the arrow head margin doesn't count.
+function isTinyShape(shape) { return isTiny(shapeBox({ tool: 'pen', points: shape.points })); }
 
 function cropRect(box, pad, maxW, maxH) {
   const x = Math.max(0, Math.floor(box.x - pad)), y = Math.max(0, Math.floor(box.y - pad));
@@ -84,7 +86,7 @@ function attachDrawing(target, { toLocal, getTool, preview, onDone }) {
     if (shape.tool !== 'pen' && !shape.points[1]) shape.points[1] = shape.points[0];
     shape.points = shape.points.map((p) => [Math.round(p[0]), Math.round(p[1])]);
     preview(null);
-    if (!isTiny(shapeBox(shape))) onDone(shape);
+    if (!isTinyShape(shape)) onDone(shape);
   };
   target.addEventListener('pointerdown', down);
   target.addEventListener('pointermove', move);

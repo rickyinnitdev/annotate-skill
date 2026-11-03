@@ -116,7 +116,7 @@ async function shootBox(page, box, id) {
   let cdp;
   try {
     const vp = await page.evaluate((b) => {
-      if (b.y < scrollY || b.y + b.h > scrollY + innerHeight) scrollTo(scrollX, Math.max(0, b.y - 40));
+      if (b.y < scrollY || b.y + b.h > scrollY + innerHeight) scrollTo({ left: scrollX, top: Math.max(0, b.y - 40), behavior: 'instant' });
       return { w: innerWidth, h: innerHeight, sx: scrollX, sy: scrollY,
         dw: document.documentElement.scrollWidth, dh: document.documentElement.scrollHeight };
     }, box);

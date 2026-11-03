@@ -18,6 +18,11 @@ test('isTiny', () => {
   assert.equal(ctx.isTiny({ x: 0, y: 0, w: 5, h: 5 }), true);
   assert.equal(ctx.isTiny({ x: 0, y: 0, w: 5, h: 40 }), false);
 });
+test('isTinyShape ignores arrow head padding', () => {
+  assert.equal(ctx.isTinyShape({ tool: 'arrow', points: [[50, 50], [52, 51]] }), true);
+  assert.equal(ctx.isTinyShape({ tool: 'ellipse', points: [[50, 50], [50, 50]] }), true);
+  assert.equal(ctx.isTinyShape({ tool: 'arrow', points: [[50, 50], [90, 50]] }), false);
+});
 test('cropRect clamps at frame corner', () => assert.deepEqual({ ...ctx.cropRect({ x: 2, y: 3, w: 10, h: 10 }, 24, 800, 600) }, { x: 0, y: 0, w: 36, h: 37 }));
 test('cropRect clamps at far edge', () => assert.deepEqual({ ...ctx.cropRect({ x: 790, y: 590, w: 20, h: 20 }, 24, 800, 600) }, { x: 766, y: 566, w: 34, h: 34 }));
 test('toolbar bundle parses', () => {
