@@ -69,12 +69,13 @@ Without this, the agent searches by text and class names. With it, each element 
 
 - **Vite + React**: `react({ babel: { plugins: mode === 'development' ? ['annotate-mcp/babel'] : [] } })`
 - **Babel**: `"env": { "development": { "plugins": ["annotate-mcp/babel"] } }`
+- **Astro**: nothing to do. The dev server already tags elements, and Annotate reads those tags.
 - Automatic fallbacks without the plugin: React ≤18 dev builds (`_debugSource`), Vue dev builds (`__file`), Svelte dev builds (`__svelte_meta`).
 
 ## Token efficiency (by design)
 
 - Only 4 tools with one-line descriptions. Longer guidance lives in `SKILL.md`.
-- `wait_for_feedback` returns a small summary (~40 tokens per annotation): comment, selector, source, and the element's text.
+- `wait_for_feedback` returns a small summary (~40 tokens per annotation): comment, selector, source, the element's text, and the CSS rules that style it (`src/styles/global.css .pegboard`).
   HTML, styles, and screenshots come from `get_annotation_details` only on request.
 - Screenshots are cropped to the element, capped at 1200×900 CSS px, saved as JPEG on disk, and returned only as a path.
   An image is attached automatically only when the comment sounds visual ("misaligned", "spacing", "color"…).

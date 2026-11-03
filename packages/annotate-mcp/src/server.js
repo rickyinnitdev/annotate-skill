@@ -4,7 +4,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connect, getLock } from 'browser-core';
@@ -60,7 +60,11 @@ function normSource(s) {
   s = s.replace(/^webpack:\/\/[^/]*\//, '').replace(/^file:\/\//, '').replace(/\?[^:]*/, '');
   const m = s.match(/^(.*?)(:\d+(?::\d+)?)?$/);
   let file = m[1];
-  if (isAbsolute(file)) { const r = relative(PROJECT, file); if (!r.startsWith('..')) file = r; }
+  if (isAbsolute(file)) {
+    const r = relative(PROJECT, file);
+    if (!r.startsWith('..')) file = r;
+    else if (/^\/[^/]/.test(file) && existsSync(join(PROJECT, file))) file = file.slice(1); // URL path like /src/styles/x.css
+  }
   return file.split(sep).join('/') + (m[2] || '');
 }
 
@@ -90,7 +94,9 @@ async function onToolbar(page, msg) {
     batch.push({
       id, n: it.n, comment: String(it.comment).slice(0, 2000), url: msg.url, path: it.path,
       selector: it.selector, text: it.text, html: it.html, styles: it.styles, rect: it.rect,
-      source: normSource(it.source), screenshot: await shoot(page, it.selector, id),
+      source: normSource(it.source),
+      css: Array.isArray(it.css) ? it.css.slice(0, 4).map((c) => { const i = c.indexOf(' '); return normSource(c.slice(0, i)) + c.slice(i); }) : [],
+      screenshot: await shoot(page, it.selector, id),
     });
   }
   await page.evaluate(() => window.__annotate?.hide(false)).catch(() => {});
@@ -105,6 +111,7 @@ function summary(a) {
   const o = { id: a.id, comment: a.comment, url: a.path, selector: a.selector };
   if (a.source) o.source = a.source;
   if (a.text) o.element_text = clip(a.text, 80);
+  if (a.css?.length) o.css = a.css;
   if (a.screenshot) o.screenshot = a.screenshot;
   return o;
 }

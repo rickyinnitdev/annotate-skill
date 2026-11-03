@@ -50,6 +50,12 @@
   function sourceFor(el) {
     const tagged = el.closest('[data-source]');
     if (tagged) return tagged.getAttribute('data-source');
+    // Astro dev server tags every element: data-astro-source-file="/abs/src/pages/index.astro" data-astro-source-loc="12:5"
+    const astro = el.closest('[data-astro-source-file]');
+    if (astro) {
+      const line = (astro.getAttribute('data-astro-source-loc') || '').split(':')[0];
+      return astro.getAttribute('data-astro-source-file') + (line ? ':' + line : '');
+    }
     for (let cur = el; cur; cur = cur.parentElement) {
       // Svelte (dev)
       if (cur.__svelte_meta?.loc) { const l = cur.__svelte_meta.loc; return `${l.file}:${l.line + 1}`; }
@@ -65,6 +71,29 @@
     return '';
   }
 
+  // Author CSS rules that match the element, newest last (those usually win), e.g.
+  // "/src/styles/global.css .pegboard". Lets the agent jump to the rule instead of grepping.
+  const GENERIC = /^(\*|html|body|:root|:where\(.*\)|\*,\s*.*)$/;
+  function cssFor(el) {
+    const out = [];
+    const walk = (rules, file) => {
+      for (const r of rules) {
+        if (r.cssRules && !r.selectorText) { walk(r.cssRules, file); continue; } // @media / @supports / @layer
+        const sel = r.selectorText;
+        if (!sel || GENERIC.test(sel.trim())) continue;
+        try { if (el.matches(sel)) out.push(`${file} ${sel.length > 80 ? sel.slice(0, 80) + '…' : sel}`); } catch {}
+      }
+    };
+    for (const sh of document.styleSheets) {
+      const node = sh.ownerNode;
+      if (node && host && (node === host || host.contains?.(node))) continue;
+      const file = node?.getAttribute?.('data-vite-dev-id') || (sh.href ? new URL(sh.href).pathname : 'inline <style>');
+      if (/node_modules/.test(file)) continue;
+      try { walk(sh.cssRules, file); } catch {} // cross-origin sheets throw
+    }
+    return [...new Set(out)].slice(-4);
+  }
+
   function describe(el) {
     const cs = getComputedStyle(el), styles = {};
     for (const k of STYLE_KEYS) { const v = cs[k]; if (v && v !== 'none' && v !== 'normal' && v !== 'auto' && v !== '0px') styles[k] = v; }
@@ -75,6 +104,7 @@
       html: el.outerHTML.slice(0, 20000),
       styles,
       source: sourceFor(el),
+      css: cssFor(el),
       rect: { x: Math.round(r.x + scrollX), y: Math.round(r.y + scrollY), w: Math.round(r.width), h: Math.round(r.height) },
     };
   }

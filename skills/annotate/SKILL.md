@@ -8,9 +8,10 @@ description: Use when the user wants to give visual feedback on a running web ap
 1. `open(url)` — the user's dev server (e.g. http://localhost:3000). A visible browser opens with the toolbar.
 2. `wait_for_feedback()` — blocks until the user clicks **Send to AI**.
    - `{"status":"waiting"}` means timeout: just call it again. Nothing is lost, and the queue persists.
-   - Otherwise you get `annotations: [{id, comment, url, selector, source?, element_text?, screenshot?}]`.
+   - Otherwise you get `annotations: [{id, comment, url, selector, source?, element_text?, css?, screenshot?}]`.
 3. For each annotation:
    - `source` (`file:line`) present → open that file directly.
+   - `css` lists the stylesheet rules that style the element (`file selector`). For style changes, edit that rule directly. Don't read the whole stylesheet.
    - No `source` → search the project for `element_text` and the class names in `selector`.
    - Need more context? `get_annotation_details(id, ["styles"])`, or `["html"]`, or `["screenshot"]`.
      Ask only for what you need. Screenshots are the most expensive item.

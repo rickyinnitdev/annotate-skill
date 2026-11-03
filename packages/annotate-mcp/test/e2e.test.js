@@ -11,7 +11,9 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { connect, ensureSession, shutdown } from 'browser-core';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const HTML = `<!doctype html><html><body><section class="hero" data-source="src/Hero.tsx:12">
+const HTML = (project) => `<!doctype html><html><head>
+<style data-vite-dev-id="${project}/src/styles/global.css">* { box-sizing: border-box } .hero a { color: red } @media (min-width: 1px) { #cta { margin-top: 4px } }</style></head><body>
+<p data-astro-source-file="${project}/src/pages/index.astro" data-astro-source-loc="7:3">Price $25</p><section class="hero" data-source="src/Hero.tsx:12">
 <h1>We build digital experiences.</h1><a id="cta" href="/gone" onclick="window.clicked=1">Go</a></section></body></html>`;
 
 test('annotate loop', { timeout: 90000 }, async () => {
@@ -19,7 +21,7 @@ test('annotate loop', { timeout: 90000 }, async () => {
   const project = mkdtempSync(join(tmpdir(), 'proj-'));
   process.env.BROWSER_CORE_HOME = home;
   process.env.BROWSER_CORE_HEADLESS = '1';
-  const site = createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.setHeader('content-security-policy', "require-trusted-types-for 'script'"); r.end(HTML); }).listen(0);
+  const site = createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.setHeader('content-security-policy', "require-trusted-types-for 'script'"); r.end(HTML(project)); }).listen(0);
   const url = `http://127.0.0.1:${site.address().port}/`;
 
   const client = new Client({ name: 'test', version: '0' });
@@ -58,6 +60,7 @@ test('annotate loop', { timeout: 90000 }, async () => {
     assert.equal(a.selector, '#cta');
     assert.equal(a.source, 'src/Hero.tsx:12');
     assert.equal(a.element_text, 'Go', 'element text always included');
+    assert.deepEqual(a.css, ['src/styles/global.css .hero a', 'src/styles/global.css #cta'], 'matching CSS rules, generic ones skipped');
     assert.ok(existsSync(join(project, a.screenshot)), 'screenshot saved');
     assert.equal(images.length, 0, 'no image for non-visual comment');
     assert.ok(JSON.stringify(json).length / 4 < 500, 'within token budget');
@@ -71,13 +74,14 @@ test('annotate loop', { timeout: 90000 }, async () => {
     const next = call('resolve_annotation', { ids: [a.id], timeout_sec: 60 });
     await new Promise((r) => setTimeout(r, 1500)); // page reloads after resolve
     await page.keyboard.press('Alt+Shift+A');
-    await page.click('h1', { force: true });
+    await page.click('p', { force: true });
     await page.keyboard.type('Bigger headline');
     await page.keyboard.press('Control+Enter');
     await page.keyboard.press('Alt+Shift+S');
     const res = (await next).json;
     assert.deepEqual(res.resolved, [a.id]);
     assert.equal(res.annotations[0].comment, 'Bigger headline');
+    assert.equal(res.annotations[0].source, 'src/pages/index.astro:7', 'Astro dev source tags');
     assert.equal(res.errors, undefined, 'toolbar must not throw (Trusted Types page)');
     const fin = await call('resolve_annotation', { ids: [res.annotations[0].id], wait: false });
     assert.equal(fin.json.open, 0);
