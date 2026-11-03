@@ -125,7 +125,8 @@
     button:hover { background: #3f3f46; } button.on { background: #6366f1; } button.go { background: #16a34a; }
     button:disabled { opacity: .4; cursor: default; }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: #71717a; margin: 0 4px; }
-    .dot.waiting { background: #22c55e; } .dot.working { background: #f59e0b; animation: p 1s infinite; }
+    .dot.waiting, .dot.done { background: #22c55e; } .dot.working { background: #f59e0b; animation: p 1s infinite; }
+    .label { font-size: 12px; color: #d4d4d8; margin-right: 4px; white-space: nowrap; } .label:empty { display: none; }
     @keyframes p { 50% { opacity: .3; } }
     .hl { position: fixed; pointer-events: none; z-index: 2147483646; border: 2px solid #6366f1; background: rgba(99,102,241,.12); border-radius: 3px; display: none; }
     .tag { position: absolute; top: -22px; left: -2px; background: #6366f1; color: #fff; font-size: 11px; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
@@ -146,11 +147,12 @@
       layer: h('div', { class: 'layer' }),
       tag: h('span', { class: 'tag' }),
       dot: h('span', { class: 'dot', title: 'Agent status' }),
+      label: h('span', { class: 'label' }),
       toggle: h('button', { class: 'toggle', title: 'Alt+Shift+A' }, 'Annotate'),
       go: h('button', { class: 'go', title: 'Alt+Shift+S', disabled: '' }, 'Send to AI'),
     };
     ui.hl = h('div', { class: 'hl' }, ui.tag);
-    root.append(style, ui.layer, ui.hl, h('div', { class: 'bar' }, ui.dot, ui.toggle, ui.go));
+    root.append(style, ui.layer, ui.hl, h('div', { class: 'bar' }, ui.dot, ui.label, ui.toggle, ui.go));
     ui.toggle.onclick = () => setActive(!active);
     ui.go.onclick = sendAll;
     document.documentElement.appendChild(host);
@@ -170,7 +172,12 @@
     document.documentElement.style.cursor = on ? 'crosshair' : '';
   }
 
-  function setStatus(s) { status = s; if (!ui.dot) return; ui.dot.className = 'dot ' + s; ui.dot.title = 'Agent: ' + s; }
+  const LABELS = { waiting: 'Ready for annotations', working: 'AI working…', done: 'Done ✓ Ready for the next one' };
+  function setStatus(s) {
+    status = s; if (!ui.dot) return;
+    ui.dot.className = 'dot ' + s; ui.dot.title = 'Agent: ' + s;
+    ui.label.textContent = LABELS[s] || '';
+  }
 
   let raf = 0;
   function render() { if (!ui.layer) return; cancelAnimationFrame(raf); raf = requestAnimationFrame(draw); }

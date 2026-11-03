@@ -7,7 +7,7 @@
 // Trigger: annotations that stay undelivered (no agent is waiting for them) for GRACE_MS.
 // Pair it with ANNOTATE_PUSH=1 on the annotate MCP server, which tells agents to end
 // their turn after each batch instead of waiting.
-import { readFileSync, appendFileSync } from 'node:fs';
+import { readFileSync, appendFileSync, writeFileSync, utimesSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 let define = (p) => p;
@@ -56,10 +56,21 @@ export default define({
         : '';
       return `[Annotate] ${items.length} new annotation(s) from the browser. ` +
         'Call annotate wait_for_feedback (it returns them immediately), apply each comment to its element, ' +
-        'then call resolve_annotation with all the ids and a short note, and end your turn.' + recent;
+        'then call resolve_annotation with all the ids and a short note. ' +
+        'Finish your reply with one line per change, then exactly: "✅ Annotate done. Waiting for your next annotation."' + recent;
+    }
+
+    // Heartbeat: while this file is fresh, the annotate server runs in push mode
+    // (agents end their turn after each batch). Skipped when one long session is wanted.
+    const alive = join(dir, '.annotate', 'push.alive');
+    function heartbeat() {
+      if (reuseNow()) return;
+      try { const t = new Date(); utimesSync(alive, t, t); }
+      catch { try { mkdirSync(join(dir, '.annotate'), { recursive: true }); writeFileSync(alive, ''); } catch {} }
     }
 
     async function tick() {
+      heartbeat();
       if (busy) return;
       const now = Date.now();
       const stale = readJson(queueFile, []).filter((a) => a.status !== 'done' && !a.deliveredAt

@@ -17,8 +17,14 @@ const TOOLBAR = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'tool
 // Only layout problems really need eyes; "make it purple" or "bigger" do not. Set ANNOTATE_IMAGES=0 for text-only models.
 const VISUAL = /\b(misalign\w*|not aligned|alignment|overlap\w*|crooked|cut off|clipped|off[- ]cent(er|re)|uneven|squished|stretched|broken|looks (off|wrong|weird|bad|broken)|layout)\b/i;
 const IMAGES = process.env.ANNOTATE_IMAGES !== '0';
-// Push mode (set by the OpenCode plugin setup): each batch starts a fresh agent session, so agents end their turn instead of waiting.
-const PUSH = process.env.ANNOTATE_PUSH === '1';
+// Push mode: the OpenCode plugin delivers each batch (usually into a fresh session), so agents end their turn
+// instead of waiting. On automatically while the plugin is running: it touches .annotate/push.alive every second.
+// ANNOTATE_PUSH=1 forces it on, ANNOTATE_PUSH=0 forces it off.
+function isPush() {
+  if (process.env.ANNOTATE_PUSH === '1') return true;
+  if (process.env.ANNOTATE_PUSH === '0') return false;
+  try { return Date.now() - statSync(join(DIR, 'push.alive')).mtimeMs < 5000; } catch { return false; }
+}
 const SHOT_W = 480, SHOT_H = 360; // max screenshot size in px; a few hundred tokens at most
 
 const queue = new Queue(DIR);
@@ -187,7 +193,8 @@ server.registerTool('open', {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.bringToFront();
     return reply('open', { ok: true, title: clip(await page.title(), 60), pending: queue.open().length, errors: takeErrors(),
-      next: PUSH ? 'Tell the user the toolbar is ready, then end your turn. Each batch they send arrives in a new session.' : undefined });
+      next: isPush() ? 'Tell the user: "✅ Annotate ready. Click elements, comment, then Send to AI." and end your turn.'
+        : 'Call wait_for_feedback. Never end your turn while the user annotates.' });
   } catch (e) { return fail('open', e); }
 });
 
@@ -218,16 +225,18 @@ async function waitForFeedback(tool, timeout_sec, extra) {
   return { annotations: items.map(summary), images };
 }
 
-const LOOP = PUSH ? '' : ' Feedback only arrives while you wait; never end your turn while the user annotates.';
-const NEXT = PUSH ? 'Done. End your turn; the next batch arrives in a new session automatically.' : undefined;
+// The exact line agents should end each round with, so the user always knows the state.
+const DONE_LINE = '✅ Annotate done. Waiting for your next annotation.';
+const NEXT_PUSH = `List the changes one line each, end with exactly: "${DONE_LINE}" and end your turn.`;
 
 server.registerTool('wait_for_feedback', {
-  description: `Get the user's annotations (blocks until "Send to AI"). On {status:"waiting"} call again.${LOOP}`,
+  description: 'Get the user\'s annotations (blocks until "Send to AI"). Follow the `next` field of results.',
   inputSchema: { timeout_sec: z.number().int().min(10).max(3600).optional().describe('default 300') },
 }, async ({ timeout_sec = 300 }, extra) => {
   try { await ensureBrowser(); } catch (e) { return fail('wait_for_feedback', e); }
   const r = await waitForFeedback('wait_for_feedback', timeout_sec, extra);
-  if (!r) return reply('wait_for_feedback', { status: 'waiting', next: 'call wait_for_feedback again' });
+  if (!r) return reply('wait_for_feedback', isPush() ? { status: 'waiting', next: 'End your turn; the next batch is delivered to you.' }
+    : { status: 'waiting', next: 'call wait_for_feedback again' });
   return reply('wait_for_feedback', { annotations: r.annotations }, r.images);
 });
 
@@ -248,15 +257,16 @@ server.registerTool('get_annotation_details', {
 });
 
 server.registerTool('resolve_annotation', {
-  description: PUSH ? 'Mark annotations done after editing; reloads the page and returns new console errors.'
-    : `Mark annotations done after editing, reload the page, then wait for and return the next round.${LOOP}`,
+  description: 'Mark annotations done after editing; reloads the page, returns console errors. Follow the `next` field.',
   inputSchema: {
     ids: z.array(z.string()).min(1),
     note: z.string().max(300).optional(),
-    wait: z.boolean().optional().describe(PUSH ? 'default false' : 'default true'),
+    wait: z.boolean().optional().describe('wait for the next batch; default depends on mode'),
     timeout_sec: z.number().int().min(10).max(3600).optional().describe('default 300'),
   },
-}, async ({ ids, note, wait = !PUSH, timeout_sec = 300 }, extra) => {
+}, async ({ ids, note, wait, timeout_sec = 300 }, extra) => {
+  const push = isPush();
+  wait ??= !push;
   const opened = new Map(queue.open().map((a) => [a.id, a]));
   const done = queue.resolve(ids, note);
   recentDone = done.map((id) => {
@@ -270,9 +280,12 @@ server.registerTool('resolve_annotation', {
     .map((p) => p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})));
   await new Promise((r) => setTimeout(r, 400)); // let errors surface
   const out = { resolved: done, open: queue.open().length, errors: takeErrors() };
-  if (!wait) { if (!out.open) setStatus('idle'); else broadcast(); return reply('resolve_annotation', { ...out, next: NEXT }); }
+  if (!wait) {
+    if (!out.open) setStatus(push ? 'done' : 'idle'); else broadcast();
+    return reply('resolve_annotation', { ...out, next: push ? NEXT_PUSH : `Tell the user: "${DONE_LINE}"` });
+  }
   const r = await waitForFeedback('resolve_annotation', timeout_sec, extra);
-  if (!r) return reply('resolve_annotation', { ...out, status: 'waiting', next: 'call wait_for_feedback' });
+  if (!r) return reply('resolve_annotation', { ...out, status: 'waiting', next: `Tell the user: "${DONE_LINE}" then call wait_for_feedback` });
   return reply('resolve_annotation', { ...out, annotations: r.annotations }, r.images);
 });
 

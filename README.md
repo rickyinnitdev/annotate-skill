@@ -70,8 +70,7 @@ Edit `~/.config/opencode/opencode.json` (Windows: `%USERPROFILE%\.config\opencod
     "servers": {
       "annotate": {
         "type": "local",
-        "command": ["node", "ANNOTATE_DIR/packages/annotate-mcp/src/server.js"],
-        "env": { "ANNOTATE_PUSH": "1" }
+        "command": ["node", "ANNOTATE_DIR/packages/annotate-mcp/src/server.js"]
       }
     }
   },
@@ -94,7 +93,7 @@ and end the background service by closing OpenCode and ending any `opencode` pro
 > **Why the plugin and `ANNOTATE_PUSH`?** An agent can only receive your comments while it's waiting for them, and some models
 > (DeepSeek, for example) stop waiting. With the plugin, nothing depends on the model: each batch you send starts a **new session**
 > containing just that batch, plus a one-line summary of the last few rounds so "undo that" still works.
-> `ANNOTATE_PUSH=1` tells the agent to finish after each batch instead of waiting.
+> While the plugin runs, the agent finishes after each batch instead of waiting. This switches on automatically; there's nothing to configure.
 > To keep everything in one session instead, see [Settings](#7-settings).
 
 ### Claude Code
@@ -155,6 +154,17 @@ It receives something like this (about 60 tokens per comment):
 The agent opens `global.css` at line 1431, changes the margin, and resolves the batch. The page reloads and the pins turn **green**.
 Comment #3 mentions an overlap, so it also got a small screenshot.
 
+The agent finishes every batch the same way, so you always know where things stand:
+
+```
+- Price in the hero note: $25 → $100 (index.astro:58)
+- .pegboard: max-width 430 → 500px (global.css:412)
+- .shop-tag: moved down, margin-top -1.15rem → 0.35rem (global.css:1431)
+✅ Annotate done. Waiting for your next annotation.
+```
+
+The toolbar shows the same thing: **AI working…** while the agent edits, then **Done ✓ Ready for the next one**.
+
 **7. Repeat.** Send the next batch whenever you like. Each batch gets its own fresh session.
 
 > **Tip:** you'll see new sessions appear in OpenCode's session list. You don't need to switch to them: watch the
@@ -178,7 +188,13 @@ Comment #3 mentions an overlap, so it also got a small screenshot.
 | Amber | Sent; the agent has it |
 | Green | Done |
 
-The **status dot** on the toolbar is green when an agent is waiting and amber while it's working.
+The **status label** next to the dot tells you what the agent is doing:
+
+| Label | Meaning |
+|---|---|
+| **Ready for annotations** | An agent is waiting; send whenever you like |
+| **AI working…** (amber) | The agent is applying your batch |
+| **Done ✓ Ready for the next one** | The batch is finished; send the next one |
 
 **Writing good comments:** comments always refer to the element you clicked. *"Make this bold"* on a heading changes that heading only.
 To change every heading, say so: *"make all section headings bold"*.
@@ -233,7 +249,7 @@ Set these in the `env` block of the MCP server config:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `ANNOTATE_PUSH` | off | `1` = agents finish after each batch; the OpenCode plugin delivers the next one. Use together with the plugin. |
+| `ANNOTATE_PUSH` | auto | On automatically while the OpenCode plugin runs (agents finish after each batch). `1` forces it on, `0` forces it off |
 | `ANNOTATE_IMAGES` | on | `0` = never attach screenshots (for text-only models) |
 | `ANNOTATE_PROJECT_DIR` | current folder | Project root, where `.annotate/` lives |
 | `ANNOTATE_TOKEN_BUDGET` | `500` | Log a warning when a result is bigger than this |
@@ -245,7 +261,7 @@ Set these in the `env` block of the MCP server config:
 ```json
 { "newSession": false }
 ```
-Then remove `ANNOTATE_PUSH` from the MCP config, so the agent waits between batches. Every batch now goes to your newest session.
+The agent then waits between batches again, and every batch goes to your newest session.
 This costs more tokens as the conversation grows, but the agent remembers everything from earlier rounds.
 
 ## 8. Troubleshooting
@@ -278,6 +294,6 @@ skills/annotate/    instructions for the agent
   It works on pages with strict security policies (Trusted Types).
 - **The 4 tools:** `open`, `wait_for_feedback`, `get_annotation_details`, `resolve_annotation`.
 - **The queue** lives in your project at `.annotate/`: `queue.json`, a readable `ANNOTATIONS.md`, `history.json` (the last 5 rounds),
-  `shots/` and `push.log`. Add `.annotate/` to your `.gitignore`.
+  `shots/`, `push.log`, and `push.alive` (the plugin's heartbeat). Add `.annotate/` to your `.gitignore`.
 - **The OpenCode plugin** checks the queue once a second, which costs no tokens. When a batch hasn't been picked up within about a second,
   it creates a session titled `Annotate: <first comment>` and queues a short message there. It never interrupts a running turn.

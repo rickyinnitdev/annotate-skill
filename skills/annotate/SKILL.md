@@ -26,6 +26,11 @@ The user clicks elements in their running site, writes comments, and presses **S
    - Push mode: it returns `next: ...end your turn`. Do that.
    - Otherwise it waits and returns the next batch. Go back to step 2.
 
+## Tell the user where things stand
+- After `open`: **✅ Annotate ready. Click elements, comment, then Send to AI.**
+- After each batch, list what you changed (one line each), then end with exactly:
+  **✅ Annotate done. Waiting for your next annotation.**
+
 ## Rules
 - **The comment is about the selected element.** "this", "the name", "the text" and "the color" all mean the element in `selector`/`element_text`, not similar things elsewhere. Change only that element, unless the comment says "everywhere" or "all".
 - If a comment is still ambiguous, make the narrowest change and state your assumption in `note`.
