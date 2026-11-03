@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtempSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,8 @@ const HTML = (project) => `<!doctype html><html><head>
 test('annotate loop', { timeout: 90000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), 'bc-'));
   const project = mkdtempSync(join(tmpdir(), 'proj-'));
+  mkdirSync(join(project, 'src/styles'), { recursive: true });
+  writeFileSync(join(project, 'src/styles/global.css'), '* { box-sizing: border-box }\n\n.hero a {\n  color: red;\n}\n@media (min-width: 1px) {\n  #cta { margin-top: 4px }\n}\n');
   process.env.BROWSER_CORE_HOME = home;
   process.env.BROWSER_CORE_HEADLESS = '1';
   const site = createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.setHeader('content-security-policy', "require-trusted-types-for 'script'"); r.end(HTML(project)); }).listen(0);
@@ -60,7 +62,11 @@ test('annotate loop', { timeout: 90000 }, async () => {
     assert.equal(a.selector, '#cta');
     assert.equal(a.source, 'src/Hero.tsx:12');
     assert.equal(a.element_text, 'Go', 'element text always included');
-    assert.deepEqual(a.css, ['src/styles/global.css .hero a', 'src/styles/global.css #cta'], 'matching CSS rules, generic ones skipped');
+    assert.deepEqual(a.css, ['src/styles/global.css:3 .hero a', 'src/styles/global.css:7 #cta'], 'CSS rules with line numbers, generic ones skipped');
+    const jpg = readFileSync(join(project, a.screenshot));
+    const sof = jpg.indexOf(Buffer.from([0xff, 0xc0]));
+    const h = jpg.readUInt16BE(sof + 5), w = jpg.readUInt16BE(sof + 7);
+    assert.ok(w > 0 && w <= 480 && h <= 360, `screenshot is small (${w}x${h})`);
     assert.ok(existsSync(join(project, a.screenshot)), 'screenshot saved');
     assert.equal(images.length, 0, 'no image for non-visual comment');
     assert.ok(JSON.stringify(json).length / 4 < 500, 'within token budget');

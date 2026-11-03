@@ -39,12 +39,23 @@ export class Queue extends EventEmitter {
     const done = [];
     for (const id of ids) {
       const a = this.get(id);
-      if (a && a.status !== 'done') { a.status = 'done'; a.note = note; done.push(id); }
+      if (a && a.status !== 'done') { a.status = 'done'; a.note = note; done.push(id); this.remember(a); }
     }
     // Finished items are dropped from storage; they never come back in results.
     this.items = this.items.filter((a) => a.status !== 'done');
     this.save();
     return done;
+  }
+
+  // Last few resolved annotations; the OpenCode plugin gives these to each fresh session
+  // so "undo what you just did" still works.
+  remember(a) {
+    const file = join(this.dir, 'history.json');
+    let h = [];
+    try { h = JSON.parse(readFileSync(file, 'utf8')); } catch {}
+    h.push({ id: a.id, comment: a.comment.slice(0, 120), selector: a.selector, source: a.source || undefined,
+      note: a.note ? a.note.slice(0, 160) : undefined, at: Date.now() });
+    writeFileSync(file, JSON.stringify(h.slice(-5)));
   }
 
   save() { this.flush(); }

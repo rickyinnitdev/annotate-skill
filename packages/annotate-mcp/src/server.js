@@ -4,7 +4,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, statSync } from 'node:fs';
 import { join, dirname, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connect, getLock } from 'browser-core';
@@ -14,7 +14,12 @@ const PROJECT = process.env.ANNOTATE_PROJECT_DIR || process.cwd();
 const DIR = join(PROJECT, '.annotate');
 const TOKEN_BUDGET = Number(process.env.ANNOTATE_TOKEN_BUDGET || 500);
 const TOOLBAR = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'toolbar.js'), 'utf8');
-const VISUAL = /\b(look|looks|align|aligned|misalign|spacing|space|gap|color|colour|overlap|font|size|bigger|smaller|margin|padding|position|layout|visual|ugly|crooked|blurry|cut off|centered|center|icon|image|shadow)\b/i;
+// Only layout problems really need eyes; "make it purple" or "bigger" do not. Set ANNOTATE_IMAGES=0 for text-only models.
+const VISUAL = /\b(misalign\w*|not aligned|alignment|overlap\w*|crooked|cut off|clipped|off[- ]cent(er|re)|uneven|squished|stretched|broken|looks (off|wrong|weird|bad|broken)|layout)\b/i;
+const IMAGES = process.env.ANNOTATE_IMAGES !== '0';
+// Push mode (set by the OpenCode plugin setup): each batch starts a fresh agent session, so agents end their turn instead of waiting.
+const PUSH = process.env.ANNOTATE_PUSH === '1';
+const SHOT_W = 480, SHOT_H = 360; // max screenshot size in px; a few hundred tokens at most
 
 const queue = new Queue(DIR);
 const log = (...a) => process.stderr.write(`[annotate] ${a.join(' ')}\n`);
@@ -69,19 +74,57 @@ function normSource(s) {
 }
 
 async function shoot(page, selector, id) {
+  let cdp;
   try {
     const loc = page.locator(selector).first();
     await loc.scrollIntoViewIfNeeded({ timeout: 1500 });
     const box = await loc.boundingBox({ timeout: 1500 });
-    const vp = page.viewportSize() || (await page.evaluate(() => ({ width: innerWidth, height: innerHeight })));
     if (!box) return undefined;
+    const vp = await page.evaluate(() => ({ w: innerWidth, h: innerHeight, sx: scrollX, sy: scrollY }));
     const x = Math.max(0, box.x - 8), y = Math.max(0, box.y - 8);
-    const clip = { x, y, width: Math.min(box.width + 16, vp.width - x, 1200), height: Math.min(box.height + 16, vp.height - y, 900) };
-    if (clip.width < 2 || clip.height < 2) return undefined;
+    const width = Math.min(box.width + 16, vp.w - x), height = Math.min(box.height + 16, vp.h - y);
+    if (width < 2 || height < 2) return undefined;
+    const scale = Math.min(1, SHOT_W / width, SHOT_H / height);
+    cdp = await page.context().newCDPSession(page);
+    const { data } = await cdp.send('Page.captureScreenshot', {
+      format: 'jpeg', quality: 60, clip: { x: x + vp.sx, y: y + vp.sy, width, height, scale } });
     const file = join(DIR, 'shots', `${id}.jpg`);
-    await page.screenshot({ path: file, clip, type: 'jpeg', quality: 70, scale: 'css', animations: 'disabled' });
+    writeFileSync(file, Buffer.from(data, 'base64'));
     return relative(PROJECT, file).split(sep).join('/');
-  } catch { return undefined; }
+  } catch { return undefined; } finally { cdp?.detach().catch(() => {}); }
+}
+
+// "file selector" -> "file:line selector", by finding the rule in the source file.
+const fileCache = new Map();
+function lines(rel) {
+  const abs = join(PROJECT, rel);
+  try {
+    const m = statSync(abs);
+    if (m.size > 3e6) return null;
+    const c = fileCache.get(abs);
+    if (c && c.mtime === m.mtimeMs) return c.lines;
+    const ls = readFileSync(abs, 'utf8').split(/\r?\n/);
+    fileCache.set(abs, { mtime: m.mtimeMs, lines: ls });
+    return ls;
+  } catch { return null; }
+}
+function cssRef(raw) {
+  const i = raw.indexOf(' ');
+  const file = normSource(raw.slice(0, i));
+  // Drop framework scoping so the selector matches what's in the source (Astro, Vue, Svelte).
+  const sel = raw.slice(i + 1).replace(/:where\(\.astro-[\w-]+\)|\[data-(astro-cid|v)-[\w-]+\]|\.svelte-[\w]+/g, '').trim();
+  const ls = lines(file);
+  let line = 0;
+  if (ls) {
+    const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const tries = [sel, sel.split(',')[0].trim(), sel.split(/[\s>+~]+/).pop()].filter(Boolean);
+    for (const t of tries) {
+      const re = new RegExp(`(^|[\\s,}])${esc(t)}\\s*[,{]`);
+      const n = ls.findIndex((l) => re.test(l));
+      if (n >= 0) { line = n + 1; break; }
+    }
+  }
+  return `${file}${line ? ':' + line : ''} ${sel}`;
 }
 
 async function onToolbar(page, msg) {
@@ -95,7 +138,7 @@ async function onToolbar(page, msg) {
       id, n: it.n, comment: String(it.comment).slice(0, 2000), url: msg.url, path: it.path,
       selector: it.selector, text: it.text, html: it.html, styles: it.styles, rect: it.rect,
       source: normSource(it.source),
-      css: Array.isArray(it.css) ? it.css.slice(0, 4).map((c) => { const i = c.indexOf(' '); return normSource(c.slice(0, i)) + c.slice(i); }) : [],
+      css: Array.isArray(it.css) ? it.css.slice(0, 4).map(cssRef) : [],
       screenshot: await shoot(page, it.selector, id),
     });
   }
@@ -132,7 +175,7 @@ const fail = (tool, e) => reply(tool, { error: String(e?.message || e).split('\n
 const server = new McpServer({ name: 'annotate', version: '0.1.0' });
 
 server.registerTool('open', {
-  description: 'Open a URL in the shared visible browser with the Annotate toolbar.',
+  description: 'Open a URL in the visible browser with the Annotate toolbar.',
   inputSchema: { url: z.string().describe('e.g. http://localhost:3000') },
 }, async ({ url }) => {
   try {
@@ -143,7 +186,8 @@ server.registerTool('open', {
       || context.pages().find((p) => p.url() === 'about:blank') || (await context.newPage());
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.bringToFront();
-    return reply('open', { ok: true, title: clip(await page.title(), 60), pending: queue.open().length, errors: takeErrors() });
+    return reply('open', { ok: true, title: clip(await page.title(), 60), pending: queue.open().length, errors: takeErrors(),
+      next: PUSH ? 'Tell the user the toolbar is ready, then end your turn. Each batch they send arrives in a new session.' : undefined });
   } catch (e) { return fail('open', e); }
 });
 
@@ -170,14 +214,15 @@ async function waitForFeedback(tool, timeout_sec, extra) {
   if (!items.length) { setStatus('idle'); return null; }
   queue.markDelivered(items);
   setStatus('working');
-  const images = items.filter((a) => a.screenshot && VISUAL.test(a.comment)).slice(0, 3).map(imageBlock).filter(Boolean);
+  const images = IMAGES ? items.filter((a) => a.screenshot && VISUAL.test(a.comment)).slice(0, 2).map(imageBlock).filter(Boolean) : [];
   return { annotations: items.map(summary), images };
 }
 
-const LOOP = 'Feedback only arrives while you are inside wait_for_feedback/resolve_annotation; never end your turn while the user is annotating.';
+const LOOP = PUSH ? '' : ' Feedback only arrives while you wait; never end your turn while the user annotates.';
+const NEXT = PUSH ? 'Done. End your turn; the next batch arrives in a new session automatically.' : undefined;
 
 server.registerTool('wait_for_feedback', {
-  description: `Block until the user clicks "Send to AI"; returns their annotations. On {status:"waiting"} call again. ${LOOP}`,
+  description: `Get the user's annotations (blocks until "Send to AI"). On {status:"waiting"} call again.${LOOP}`,
   inputSchema: { timeout_sec: z.number().int().min(10).max(3600).optional().describe('default 300') },
 }, async ({ timeout_sec = 300 }, extra) => {
   try { await ensureBrowser(); } catch (e) { return fail('wait_for_feedback', e); }
@@ -187,7 +232,7 @@ server.registerTool('wait_for_feedback', {
 });
 
 server.registerTool('get_annotation_details', {
-  description: 'Fetch heavy details for one annotation only when needed.',
+  description: 'Heavy details for one annotation; ask only for what you need.',
   inputSchema: {
     id: z.string(),
     fields: z.array(z.enum(['html', 'styles', 'rect', 'text', 'screenshot'])).min(1),
@@ -203,14 +248,15 @@ server.registerTool('get_annotation_details', {
 });
 
 server.registerTool('resolve_annotation', {
-  description: `Mark annotations done after editing, reload the page, then (by default) wait for the next round, returning it like wait_for_feedback. ${LOOP}`,
+  description: PUSH ? 'Mark annotations done after editing; reloads the page and returns new console errors.'
+    : `Mark annotations done after editing, reload the page, then wait for and return the next round.${LOOP}`,
   inputSchema: {
     ids: z.array(z.string()).min(1),
     note: z.string().max(300).optional(),
-    wait: z.boolean().optional().describe('default true'),
+    wait: z.boolean().optional().describe(PUSH ? 'default false' : 'default true'),
     timeout_sec: z.number().int().min(10).max(3600).optional().describe('default 300'),
   },
-}, async ({ ids, note, wait = true, timeout_sec = 300 }, extra) => {
+}, async ({ ids, note, wait = !PUSH, timeout_sec = 300 }, extra) => {
   const opened = new Map(queue.open().map((a) => [a.id, a]));
   const done = queue.resolve(ids, note);
   recentDone = done.map((id) => {
@@ -224,7 +270,7 @@ server.registerTool('resolve_annotation', {
     .map((p) => p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})));
   await new Promise((r) => setTimeout(r, 400)); // let errors surface
   const out = { resolved: done, open: queue.open().length, errors: takeErrors() };
-  if (!wait) { if (!out.open) setStatus('idle'); else broadcast(); return reply('resolve_annotation', out); }
+  if (!wait) { if (!out.open) setStatus('idle'); else broadcast(); return reply('resolve_annotation', { ...out, next: NEXT }); }
   const r = await waitForFeedback('resolve_annotation', timeout_sec, extra);
   if (!r) return reply('resolve_annotation', { ...out, status: 'waiting', next: 'call wait_for_feedback' });
   return reply('resolve_annotation', { ...out, annotations: r.annotations }, r.images);
