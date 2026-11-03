@@ -170,6 +170,7 @@ function cssRef(raw) {
 async function onToolbar(page, msg) {
   if (msg?.type === 'sync') return toolbarState();
   if (msg?.type !== 'send' || !Array.isArray(msg.items)) return toolbarState();
+  if (msg.kind === 'app') return onAppSend(msg);
   const ui = (fn, arg) => page.evaluate(([f, a]) => window.__annotate?.[f](a), [fn, arg]).catch(() => {});
   const batch = [];
   for (const it of msg.items.slice(0, 50)) {
@@ -193,6 +194,39 @@ async function onToolbar(page, msg) {
   return toolbarState();
 }
 
+// App page batch: frames and crops arrive as JPEG data URLs (the server can't see other windows itself).
+const MAX_IMG = 4 * 1024 * 1024;
+function jpegData(d) {
+  if (typeof d !== 'string' || !d.startsWith('data:image/jpeg;base64,') || d.length > MAX_IMG * 1.4) return null;
+  const buf = Buffer.from(d.slice(23), 'base64');
+  return buf.length && buf.length <= MAX_IMG ? buf : null;
+}
+const unit = (v) => Number.isFinite(v) && v >= 0 && v <= 1;
+function onAppSend(msg) {
+  if (msg.token !== SNAP_TOKEN) return toolbarState(); // another instance's App page, or not the App page at all
+  const frames = Array.isArray(msg.frames) ? msg.frames.slice(0, 5) : [];
+  const fullFor = new Map(); // frame index -> saved full-frame path
+  const app = String(msg.app || '').trim().slice(0, 80) || undefined;
+  const rel = (f) => relative(PROJECT, f).split(sep).join('/');
+  const batch = [];
+  for (const it of msg.items.slice(0, 50)) {
+    const crop = jpegData(it.crop), r = it.region;
+    if (!crop || !r || !['x', 'y', 'w', 'h'].every((k) => unit(r[k])) || !Number.isInteger(it.frame)) continue;
+    const id = queue.nextId();
+    const shotFile = join(DIR, 'shots', `${id}.jpg`);
+    writeFileSync(shotFile, crop);
+    if (!fullFor.has(it.frame)) {
+      const full = jpegData(frames[it.frame]);
+      if (full) { const f = join(DIR, 'shots', `${id}-full.jpg`); writeFileSync(f, full); fullFor.set(it.frame, rel(f)); }
+      else fullFor.set(it.frame, undefined);
+    }
+    batch.push({ id, n: it.n, kind: 'app', comment: String(it.comment || '').slice(0, 2000), url: msg.url, path: '/snap', app,
+      region: { x: r.x, y: r.y, w: r.w, h: r.h }, screenshot: rel(shotFile), full: fullFor.get(it.frame) });
+  }
+  if (batch.length) { queue.addBatch(batch); log(`received ${batch.length} app annotation(s)`); }
+  return toolbarState();
+}
+
 function validBox(b) {
   return b && ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(b[k])) && b.w >= 0 && b.h >= 0;
 }
@@ -202,6 +236,12 @@ const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : s);
 function summary(a) {
   const o = { id: a.id, comment: a.comment };
   if (a.kind) o.kind = a.kind;
+  if (a.kind === 'app') {
+    if (a.app) o.app = a.app;
+    o.region = [a.region.x, a.region.y, a.region.w, a.region.h];
+    o.screenshot = a.screenshot;
+    return o;
+  }
   o.url = a.path;
   if (a.selector) o.selector = a.selector;
   if (a.source) o.source = a.source;
@@ -210,8 +250,8 @@ function summary(a) {
   if (a.screenshot) o.screenshot = a.screenshot;
   return o;
 }
-function imageBlock(a) {
-  try { return { type: 'image', mimeType: 'image/jpeg', data: readFileSync(join(PROJECT, a.screenshot)).toString('base64') }; }
+function imageBlock(a, key = 'screenshot') {
+  try { return { type: 'image', mimeType: 'image/jpeg', data: readFileSync(join(PROJECT, a[key])).toString('base64') }; }
   catch { return null; }
 }
 function reply(tool, obj, images = [], { budget = true } = {}) {
@@ -288,12 +328,13 @@ async function waitForFeedback(tool, timeout_sec, extra) {
   setStatus('working');
   // Drawings and app snapshots are visual by nature: they always get their image. Elements only for layout words.
   const wantsImage = [...items.filter((a) => a.kind && a.screenshot), ...items.filter((a) => !a.kind && a.screenshot && VISUAL.test(a.comment))];
-  const images = IMAGES ? wantsImage.slice(0, 2).map(imageBlock).filter(Boolean) : [];
+  const images = IMAGES ? wantsImage.slice(0, 2).map((a) => imageBlock(a)).filter(Boolean) : [];
   return { annotations: items.map(summary), images };
 }
 
 // The exact line agents should end each round with, so the user always knows the state.
 const DONE_LINE = '✅ Annotate done. Waiting for your next annotation.';
+const APP_NOTE = ' For app annotations, tell the user to restart or hot-reload their app to see the change.';
 const NEXT_PUSH = `List the changes one line each, end with exactly: "${DONE_LINE}" and end your turn.`;
 
 server.registerTool('wait_for_feedback', {
@@ -311,15 +352,19 @@ server.registerTool('get_annotation_details', {
   description: 'Heavy details for one annotation; ask only for what you need.',
   inputSchema: {
     id: z.string(),
-    fields: z.array(z.enum(['html', 'styles', 'rect', 'text', 'screenshot', 'under', 'box'])).min(1),
+    fields: z.array(z.enum(['html', 'styles', 'rect', 'text', 'screenshot', 'under', 'box', 'full'])).min(1),
   },
 }, async ({ id, fields }) => {
   const a = queue.get(id);
   if (!a) return reply('get_annotation_details', { error: `unknown or resolved id ${id}` });
   const out = { id };
-  for (const f of fields) if (f !== 'screenshot') out[f] = f === 'html' ? clip(a.html, 6000) : a[f];
-  const images = fields.includes('screenshot') && a.screenshot ? [imageBlock(a)].filter(Boolean) : [];
-  if (fields.includes('screenshot') && !images.length) out.screenshot = 'unavailable';
+  for (const f of fields) if (f !== 'screenshot' && f !== 'full') out[f] = f === 'html' ? clip(a.html, 6000) : a[f];
+  const images = [];
+  for (const f of ['screenshot', 'full']) {
+    if (!fields.includes(f)) continue;
+    const img = a[f] && imageBlock(a, f);
+    if (img) images.push(img); else out[f] = 'unavailable';
+  }
   return reply('get_annotation_details', out, images, { budget: false });
 });
 
@@ -342,18 +387,19 @@ server.registerTool('resolve_annotation', {
   });
   setTimeout(() => { recentDone = []; broadcast(); }, 8000);
   // Reload annotated tabs so the user sees the new code even when hot reload is broken.
-  const urls = new Set(done.map((id) => opened.get(id).url));
+  const app = done.some((id) => opened.get(id).kind === 'app');
+  const urls = new Set(done.filter((id) => opened.get(id).kind !== 'app').map((id) => opened.get(id).url)); // never reload the App page
   if (conn) await Promise.all(conn.context.pages().filter((p) => urls.has(p.url()))
     .map((p) => p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})));
   await new Promise((r) => setTimeout(r, 400)); // let errors surface
   const out = { resolved: done, open: queue.open().length, errors: takeErrors() };
   if (!wait) {
     if (!out.open) setStatus(push ? 'done' : 'idle'); else broadcast();
-    return reply('resolve_annotation', { ...out, next: push ? NEXT_PUSH : `Tell the user: "${DONE_LINE}"` });
+    return reply('resolve_annotation', { ...out, next: (push ? NEXT_PUSH : `Tell the user: "${DONE_LINE}"`) + (app ? APP_NOTE : '') });
   }
   const r = await waitForFeedback('resolve_annotation', timeout_sec, extra);
-  if (!r) return reply('resolve_annotation', { ...out, status: 'waiting', next: `Tell the user: "${DONE_LINE}" then call wait_for_feedback` });
-  return reply('resolve_annotation', { ...out, annotations: r.annotations }, r.images);
+  if (!r) return reply('resolve_annotation', { ...out, status: 'waiting', next: `Tell the user: "${DONE_LINE}" then call wait_for_feedback` + (app ? APP_NOTE : '') });
+  return reply('resolve_annotation', { ...out, annotations: r.annotations, ...(app ? { next: APP_NOTE.trim() } : {}) }, r.images);
 });
 
 const transport = new StdioServerTransport();

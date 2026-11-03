@@ -5,12 +5,14 @@ description: Use when the user wants to give visual feedback on a running web ap
 
 # Annotate
 
-The user clicks elements in their running site, writes comments, and presses **Send to AI**. You apply the comments to the code.
+The user clicks elements in their running site (or circles areas, or snapshots any app window), writes comments, and presses **Send to AI**. You apply the comments to the code.
 
 ## Start
 `open(url)`: the user's dev server, e.g. `http://localhost:4321`. A browser window opens with the toolbar.
 - If the result says `next: ...end your turn...` (push mode), tell the user it's ready and **end your turn**. Each batch they send arrives later as a new message, usually in a new session.
 - Otherwise, call `wait_for_feedback()`.
+
+`open_app()`: for desktop apps or anything that isn't a web page. It opens the App page where the user snapshots a window, draws and comments. Same `next` rules as `open`.
 
 ## Each batch
 1. `wait_for_feedback()` returns `annotations: [{id, comment, url, selector, source?, element_text?, css?, screenshot?}]`.
@@ -23,6 +25,10 @@ The user clicks elements in their running site, writes comments, and presses **S
    - `kind: "draw"`: the user circled an area instead of clicking. The comment is about that area; `source`/`css`
      describe the main element under the drawing (they may be missing over empty space). The image with the drawing is
      attached. `get_annotation_details(id, ["under"])` lists a few more elements under it.
+   - `kind: "app"`: a drawing on a snapshot of an app window. There's no `source`. Use `app` (the name the user typed),
+     the text visible in the attached image, `region` (`[x, y, w, h]`, 0–1 of the window) and the project to find the code.
+     `get_annotation_details(id, ["full"])` returns the whole window if the crop isn't enough. After resolving, tell the user
+     to restart or hot-reload their app.
 3. Edit the code. Handle the whole batch before resolving.
 4. `resolve_annotation(ids, note)` with all the ids and a one-line note on what you changed. It reloads the page.
    If it returns `errors`, fix them.

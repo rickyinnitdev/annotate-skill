@@ -53,7 +53,7 @@ export class Queue extends EventEmitter {
     const file = join(this.dir, 'history.json');
     let h = [];
     try { h = JSON.parse(readFileSync(file, 'utf8')); } catch {}
-    h.push({ id: a.id, comment: a.comment.slice(0, 120), selector: a.selector || '[drawing]', source: a.source || undefined,
+    h.push({ id: a.id, comment: a.comment.slice(0, 120), selector: a.selector || (a.kind === 'app' ? `[app: ${a.app || 'window'}]` : '[drawing]'), source: a.source || undefined,
       note: a.note ? a.note.slice(0, 160) : undefined, at: Date.now() });
     writeFileSync(file, JSON.stringify(h.slice(-5)));
   }
@@ -65,7 +65,9 @@ export class Queue extends EventEmitter {
     writeFileSync(tmp, JSON.stringify(this.items));
     renameSync(tmp, this.file); // atomic on both POSIX and Windows (same volume)
     const lines = ['# Open annotations', '', ...this.open().map((a) =>
-      `- [ ] **${a.id}** ${a.url} ${a.kind === 'draw' ? '[drawing]' : `\`${a.selector}\``}${a.source ? ` (${a.source})` : ''}: ${a.comment.replace(/\n/g, ' ')}`)];
+      a.kind === 'app'
+        ? `- [ ] **${a.id}** [app: ${a.app || 'window'}] (${a.region.x},${a.region.y} ${a.region.w}×${a.region.h}): ${a.comment.replace(/\n/g, ' ')}`
+        : `- [ ] **${a.id}** ${a.url} ${a.kind === 'draw' ? '[drawing]' : `\`${a.selector}\``}${a.source ? ` (${a.source})` : ''}: ${a.comment.replace(/\n/g, ' ')}`)];
     if (lines.length === 2) lines.push('_None. All annotations resolved._');
     writeFileSync(join(this.dir, 'ANNOTATIONS.md'), lines.join('\n') + '\n');
   }

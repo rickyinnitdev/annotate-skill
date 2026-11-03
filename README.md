@@ -1,8 +1,9 @@
 # Annotate
 
-**Point at your website and tell your AI coding agent what to change.**
+**Point at your website or app and tell your AI coding agent what to change.**
 
-Open your site in a browser, click any element, type a comment like *"make this button purple"*, and press **Send to AI**.
+Open your site in a browser, click any element (or circle an area), type a comment like *"make this button purple"*, and press **Send to AI**.
+Building a desktop app instead? Snapshot its window, draw on it and comment the same way.
 Your agent (OpenCode, Claude Code, or any MCP-compatible agent) finds the right file and line, edits the code, and the page reloads with the change.
 
 ```
@@ -19,6 +20,7 @@ Your agent (OpenCode, Claude Code, or any MCP-compatible agent) finds the right 
 - **Works on Linux, Windows and macOS.** Plain Node.js, no build step.
 - **Uses your default browser** (Chrome, Edge, Brave, Vivaldi, Chromium or Opera). Otherwise it uses a bundled Chromium.
 - **Finds the code for you:** file and line for Astro, React, Vue and Svelte, plus the exact CSS rule (file:line) that styles each element.
+- **Any app, not just websites:** snapshot any window on your screen (Qt, GTK, Flutter, Electron, Tauri, native…), draw on it and comment.
 - **Cheap on tokens:** a typical annotation is about 60 tokens. Screenshots are small and only sent when needed. With OpenCode, each batch starts a fresh session, so cost doesn't grow over time.
 
 ---
@@ -28,6 +30,7 @@ Your agent (OpenCode, Claude Code, or any MCP-compatible agent) finds the right 
 2. [Connect your agent](#2-connect-your-agent)
 3. [Using it: a walkthrough](#3-using-it-a-walkthrough)
 4. [Toolbar reference](#4-toolbar-reference)
+   - [Annotating desktop apps](#annotating-desktop-apps)
 5. [How the agent finds your code](#5-how-the-agent-finds-your-code)
 6. [Saving tokens](#6-saving-tokens)
 7. [Settings](#7-settings)
@@ -206,6 +209,35 @@ The **status label** next to the dot tells you what the agent is doing:
 **Writing good comments:** comments always refer to the element you clicked. *"Make this bold"* on a heading changes that heading only.
 To change every heading, say so: *"make all section headings bold"*.
 
+### Annotating desktop apps
+
+For anything that isn't a web page, ask your agent:
+> open the annotate app page
+
+(it calls `open_app`). A page called **Annotate · App** opens in the Annotate browser.
+
+1. **Choose window**: your system's screen-share picker opens. Pick your app's window.
+2. **Capture** freezes the current frame. Capture again whenever the app changes; old frames stay in the list.
+3. **Draw** on the frame (Pen / Ellipse / Arrow), type a comment, `Ctrl+Enter`. Add as many as you like, on any frame.
+4. Optionally type the app's name (for example *"Settings window"*). Browsers can't read window titles, and the name helps the agent find the code.
+5. **Send to AI** (or `Alt+Shift+S`).
+
+The agent gets a small crop of each drawing, the comment, the app name and where on the window it was. It can ask for the
+whole frame if it needs more context. There's no file and line for native apps, so the agent finds the code from the
+visible text, the app name and your project. After the change, restart or hot-reload your app and capture again.
+
+The window stays shared until you pick another one or close the page, so you don't get asked again for every capture.
+Your browser shows its usual "sharing" indicator while it's on.
+
+| System | What to expect |
+|---|---|
+| Linux (Wayland) | Your desktop asks which window to share the first time. Nothing to set up |
+| Linux (X11), Windows | The browser shows its own window picker. Nothing to set up |
+| macOS | Allow the browser under **System Settings → Privacy & Security → Screen Recording**, then restart it. Otherwise other apps' windows are missing or blank. If Annotate uses the bundled Chromium, it appears there as **Chromium** |
+
+- **Tauri apps:** use App snapshots. Opening a Tauri dev URL in a normal browser often breaks, because the Tauri APIs aren't there.
+- **Text-only models** (`ANNOTATE_IMAGES=0`) get no image, only the comment, the app name and the position. Use a model that reads images for App snapshots.
+
 ## 5. How the agent finds your code
 
 Each annotation tells the agent where to look, so it doesn't have to search:
@@ -281,6 +313,7 @@ This costs more tokens as the conversation grows, but the agent remembers everyt
 | Wrong browser opens | Set `BROWSER_CORE_BROWSER`, for example `chrome`. Firefox and Safari can't be automated this way, so Annotate uses Chromium for them |
 | You're logged out on the Annotate window | It uses its own profile (`~/.browser-core/profile`), because Chrome blocks automation on your main profile. Log in once; it remembers you |
 | The browser won't start | Run `npx playwright install chromium` in `ANNOTATE_DIR`, and check `~/.browser-core/daemon.log` |
+| **Choose window** shows nothing or a black frame | macOS: give the browser Screen Recording permission and restart it. Linux: make sure `xdg-desktop-portal` is running |
 | The agent says it "can't see your screen" | It doesn't need to. Annotations include the element, its text, file and CSS. A screenshot is attached for layout problems |
 | See open work | `.annotate/ANNOTATIONS.md` lists every unresolved comment |
 
@@ -289,7 +322,7 @@ This costs more tokens as the conversation grows, but the agent remembers everyt
 ```
 packages/
   browser-core/     one shared browser (Chrome DevTools Protocol), control lock, security token
-  annotate-mcp/     MCP server with 4 tools, the injected toolbar, and the Babel plugin
+  annotate-mcp/     MCP server with 5 tools, the injected toolbar, the App page, and the Babel plugin
   opencode-plugin/  delivers batches into fresh OpenCode sessions
 skills/annotate/    instructions for the agent
 ```
@@ -299,7 +332,9 @@ skills/annotate/    instructions for the agent
   Closing the browser stops the process, and the next `open` restarts it.
 - **The toolbar** is injected into every page and runs in a closed shadow root, so your site's CSS can't affect it and it can't affect your site.
   It works on pages with strict security policies (Trusted Types).
-- **The 4 tools:** `open`, `wait_for_feedback`, `get_annotation_details`, `resolve_annotation`.
+- **The 5 tools:** `open`, `open_app`, `wait_for_feedback`, `get_annotation_details`, `resolve_annotation`.
+- **The App page** is served by the MCP server on `127.0.0.1` behind a random token. Frames never leave your machine except
+  as the small crops (and, if the agent asks, the full frame) sent to your agent.
 - **The queue** lives in your project at `.annotate/`: `queue.json`, a readable `ANNOTATIONS.md`, `history.json` (the last 5 rounds),
   `shots/`, `push.log`, and `push.alive` (the plugin's heartbeat). Add `.annotate/` to your `.gitignore`.
 - **The OpenCode plugin** checks the queue once a second, which costs no tokens. When a batch hasn't been picked up within about a second,
