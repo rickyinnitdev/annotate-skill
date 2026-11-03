@@ -17,6 +17,8 @@ const SRC = dirname(fileURLToPath(import.meta.url));
 const TOOLBAR_SRC = readFileSync(join(SRC, 'toolbar.js'), 'utf8');
 const DRAW_SRC = readFileSync(join(SRC, 'draw.js'), 'utf8');
 // One init script: draw.js helpers + the toolbar, in a private scope. SNAP_ORIGIN = the App page (no toolbar there).
+// Node-side copies of the pure draw.js helpers (cropRect, shapeBox) so the server crops the same way.
+const drawLib = (() => { const c = {}; new Function('c', `${DRAW_SRC}\nc.cropRect = cropRect; c.shapeBox = shapeBox;`)(c); return c; })();
 const buildToolbar = (snapOrigin) => `(() => {\nconst SNAP_ORIGIN = ${JSON.stringify(snapOrigin)};\n${DRAW_SRC}\n${TOOLBAR_SRC}\n})();`;
 // Only layout problems really need eyes; "make it purple" or "bigger" do not. Set ANNOTATE_IMAGES=0 for text-only models.
 const VISUAL = /\b(misalign\w*|not aligned|alignment|overlap\w*|crooked|cut off|clipped|off[- ]cent(er|re)|uneven|squished|stretched|broken|looks (off|wrong|weird|bad|broken)|layout)\b/i;
@@ -58,7 +60,7 @@ function pushErr(t) { if (/\[annotate\]|__annotate/.test(t)) return; consoleErro
 function takeErrors() { const e = [...new Set(consoleErrors.splice(0))].slice(-5); return e.length ? e : undefined; }
 
 function toolbarState() {
-  const open = queue.open().map((a) => ({ id: a.id, n: a.n, selector: a.selector, comment: a.comment, path: a.path, state: 'sent' }));
+  const open = queue.open().map((a) => ({ id: a.id, n: a.n, kind: a.kind, box: a.box, selector: a.selector, comment: a.comment, path: a.path, state: 'sent' }));
   return { status, open: [...open, ...recentDone] };
 }
 
@@ -104,6 +106,29 @@ async function shoot(page, selector, id) {
   } catch { return undefined; } finally { cdp?.detach().catch(() => {}); }
 }
 
+// Screenshot of a drawn area (box in page coordinates), strokes included.
+async function shootBox(page, box, id) {
+  let cdp;
+  try {
+    const vp = await page.evaluate((b) => {
+      if (b.y < scrollY || b.y + b.h > scrollY + innerHeight) scrollTo(scrollX, Math.max(0, b.y - 40));
+      return { w: innerWidth, h: innerHeight, sx: scrollX, sy: scrollY,
+        dw: document.documentElement.scrollWidth, dh: document.documentElement.scrollHeight };
+    }, box);
+    await new Promise((r) => setTimeout(r, 50)); // let the overlay re-render after scrolling
+    const c = drawLib.cropRect(box, 24, vp.dw, vp.dh);
+    const x = Math.max(c.x, vp.sx), y = Math.max(c.y, vp.sy);
+    const width = Math.min(c.x + c.w, vp.sx + vp.w) - x, height = Math.min(c.y + c.h, vp.sy + vp.h) - y;
+    if (width < 2 || height < 2) return undefined;
+    const scale = Math.min(1, SHOT_W / width, SHOT_H / height);
+    cdp = await page.context().newCDPSession(page);
+    const { data } = await cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 60, clip: { x, y, width, height, scale } });
+    const file = join(DIR, 'shots', `${id}.jpg`);
+    writeFileSync(file, Buffer.from(data, 'base64'));
+    return relative(PROJECT, file).split(sep).join('/');
+  } catch { return undefined; } finally { cdp?.detach().catch(() => {}); }
+}
+
 // "file selector" -> "file:line selector", by finding the rule in the source file.
 const fileCache = new Map();
 function lines(rel) {
@@ -140,28 +165,40 @@ function cssRef(raw) {
 async function onToolbar(page, msg) {
   if (msg?.type === 'sync') return toolbarState();
   if (msg?.type !== 'send' || !Array.isArray(msg.items)) return toolbarState();
-  await page.evaluate(() => window.__annotate?.hide(true)).catch(() => {});
+  const ui = (fn, arg) => page.evaluate(([f, a]) => window.__annotate?.[f](a), [fn, arg]).catch(() => {});
   const batch = [];
   for (const it of msg.items.slice(0, 50)) {
     const id = queue.nextId();
+    const draw = it.kind === 'draw' && validBox(it.box);
+    let screenshot;
+    if (draw) { await ui('capture', true); screenshot = await shootBox(page, it.box, id); await ui('capture', false); }
+    else if (it.selector) { await ui('hide', true); screenshot = await shoot(page, it.selector, id); await ui('hide', false); }
     batch.push({
       id, n: it.n, comment: String(it.comment).slice(0, 2000), url: msg.url, path: it.path,
+      ...(draw ? { kind: 'draw', box: it.box, under: Array.isArray(it.under)
+        ? it.under.slice(0, 3).map((u) => ({ selector: String(u.selector || ''), source: normSource(u.source) || undefined })) : [] } : {}),
       selector: it.selector, text: it.text, html: it.html, styles: it.styles, rect: it.rect,
       source: normSource(it.source),
       css: Array.isArray(it.css) ? it.css.slice(0, 4).map(cssRef) : [],
-      screenshot: await shoot(page, it.selector, id),
+      screenshot,
     });
   }
-  await page.evaluate(() => window.__annotate?.hide(false)).catch(() => {});
   queue.addBatch(batch);
   log(`received ${batch.length} annotation(s)`);
   return toolbarState();
 }
 
+function validBox(b) {
+  return b && ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(b[k])) && b.w >= 0 && b.h >= 0;
+}
+
 // ---------- result helpers ----------
 const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : s);
 function summary(a) {
-  const o = { id: a.id, comment: a.comment, url: a.path, selector: a.selector };
+  const o = { id: a.id, comment: a.comment };
+  if (a.kind) o.kind = a.kind;
+  o.url = a.path;
+  if (a.selector) o.selector = a.selector;
   if (a.source) o.source = a.source;
   if (a.text) o.element_text = clip(a.text, 80);
   if (a.css?.length) o.css = a.css;
@@ -225,7 +262,9 @@ async function waitForFeedback(tool, timeout_sec, extra) {
   if (!items.length) { setStatus('idle'); return null; }
   queue.markDelivered(items);
   setStatus('working');
-  const images = IMAGES ? items.filter((a) => a.screenshot && VISUAL.test(a.comment)).slice(0, 2).map(imageBlock).filter(Boolean) : [];
+  // Drawings and app snapshots are visual by nature: they always get their image. Elements only for layout words.
+  const wantsImage = [...items.filter((a) => a.kind && a.screenshot), ...items.filter((a) => !a.kind && a.screenshot && VISUAL.test(a.comment))];
+  const images = IMAGES ? wantsImage.slice(0, 2).map(imageBlock).filter(Boolean) : [];
   return { annotations: items.map(summary), images };
 }
 
@@ -248,7 +287,7 @@ server.registerTool('get_annotation_details', {
   description: 'Heavy details for one annotation; ask only for what you need.',
   inputSchema: {
     id: z.string(),
-    fields: z.array(z.enum(['html', 'styles', 'rect', 'text', 'screenshot'])).min(1),
+    fields: z.array(z.enum(['html', 'styles', 'rect', 'text', 'screenshot', 'under', 'box'])).min(1),
   },
 }, async ({ id, fields }) => {
   const a = queue.get(id);
@@ -274,8 +313,8 @@ server.registerTool('resolve_annotation', {
   const opened = new Map(queue.open().map((a) => [a.id, a]));
   const done = queue.resolve(ids, note);
   recentDone = done.map((id) => {
-    const { n, selector, comment, path } = opened.get(id);
-    return { id, n, selector, comment, path, state: 'done' };
+    const { n, kind, box, selector, comment, path } = opened.get(id);
+    return { id, n, kind, box, selector, comment, path, state: 'done' };
   });
   setTimeout(() => { recentDone = []; broadcast(); }, 8000);
   // Reload annotated tabs so the user sees the new code even when hot reload is broken.

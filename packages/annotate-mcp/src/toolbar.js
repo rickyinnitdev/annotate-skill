@@ -2,12 +2,14 @@
 // Talks to the MCP server only through the exposed binding window.__annotate_send.
 (() => {
   if (window.top !== window || window.__annotate) return;
+  if (typeof SNAP_ORIGIN === 'string' && location.origin === SNAP_ORIGIN) return; // the App page has its own UI
   const KEY = '__annotate_drafts';
   const STYLE_KEYS = ['display', 'position', 'width', 'height', 'margin', 'padding', 'color',
     'backgroundColor', 'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'textAlign',
     'border', 'borderRadius', 'gap', 'flexDirection', 'justifyContent', 'alignItems', 'gridTemplateColumns', 'boxShadow', 'opacity'];
 
   let active = false, hoverEl = null, editing = null, status = 'idle', host, root, ui = {};
+  let drawing = false, tool = 'pen', previewShape = null, pending = null; // Draw mode
   let drafts = load();          // [{n, selector, comment, path}] not yet sent
   let sent = [];                // [{id, n, selector, comment, state}] from server
   const elRefs = new Map();     // n -> element (fast path while still in DOM)
@@ -109,6 +111,23 @@
     };
   }
 
+  // Elements under a drawing (box in page coords): the smallest one holding the centre first, then up to 3 others.
+  function elementsUnder(box) {
+    const pts = [];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) pts.push([box.x + box.w * (i + 0.5) / 3, box.y + box.h * (j + 0.5) / 3]);
+    const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+    const skip = (el) => !el || el === host || el === document.documentElement || el === document.body;
+    const area = (el) => { const r = el.getBoundingClientRect(); return r.width * r.height; };
+    const centre = document.elementsFromPoint(cx - scrollX, cy - scrollY).filter((el) => !skip(el));
+    const best = centre.sort((a, b) => area(a) - area(b))[0];
+    const out = best ? [best] : [];
+    for (const [x, y] of pts) {
+      const el = document.elementFromPoint(x - scrollX, y - scrollY);
+      if (!skip(el) && !out.includes(el) && out.length < 4) out.push(el);
+    }
+    return out;
+  }
+
   function find(d) {
     const ref = elRefs.get(d.n);
     if (ref && ref.isConnected) return ref;
@@ -136,7 +155,12 @@
     .pop { position: fixed; z-index: 2147483647; width: 280px; background: #18181b; color: #fafafa; border-radius: 10px; padding: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.35); }
     textarea { width: 100%; min-height: 64px; resize: vertical; border: 1px solid #3f3f46; border-radius: 6px; background: #09090b; color: inherit; padding: 6px; }
     .row { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; } .hint { color: #a1a1aa; font-size: 11px; margin-right: auto; align-self: center; }
-    .layer { position: absolute; left: 0; top: 0; width: 0; height: 0; }`;
+    .layer { position: absolute; left: 0; top: 0; width: 0; height: 0; }
+    .ink { position: fixed; inset: 0; z-index: 2147483646; cursor: crosshair; display: none; touch-action: none; }
+    .ink.on { display: block; }
+    .strokes { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; z-index: 2147483644; }
+    .tools { display: none; gap: 2px; } .tools.on { display: flex; } .tools button { padding: 6px 8px; }
+    :host(.capturing) .bar, :host(.capturing) .pin, :host(.capturing) .pop, :host(.capturing) .hl, :host(.capturing) .ink { display: none !important; }`;
 
   function mount() {
     host = document.createElement('annotate-toolbar');
@@ -149,11 +173,27 @@
       dot: h('span', { class: 'dot', title: 'Agent status' }),
       label: h('span', { class: 'label' }),
       toggle: h('button', { class: 'toggle', title: 'Alt+Shift+A' }, 'Annotate'),
+      drawBtn: h('button', { class: 'draw', title: 'Alt+Shift+D: circle an area and comment' }, 'Draw'),
+      tools: h('span', { class: 'tools' }),
+      ink: h('div', { class: 'ink' }),
       go: h('button', { class: 'go', title: 'Alt+Shift+S', disabled: '' }, 'Send to AI'),
     };
+    ui.toolBtns = {};
+    for (const [t, label] of [['pen', 'Pen'], ['ellipse', 'Ellipse'], ['arrow', 'Arrow']]) {
+      const b = h('button', { class: t === tool ? 'on' : '', title: label }, label);
+      b.onclick = () => { tool = t; for (const k in ui.toolBtns) ui.toolBtns[k].classList.toggle('on', k === t); };
+      ui.toolBtns[t] = b; ui.tools.append(b);
+    }
     ui.hl = h('div', { class: 'hl' }, ui.tag);
-    root.append(style, ui.layer, ui.hl, h('div', { class: 'bar' }, ui.dot, ui.label, ui.toggle, ui.go));
+    root.append(style, ui.layer, ui.hl, ui.ink, h('div', { class: 'bar' }, ui.dot, ui.label, ui.tools, ui.toggle, ui.drawBtn, ui.go));
     ui.toggle.onclick = () => setActive(!active);
+    ui.drawBtn.onclick = () => setDrawing(!drawing);
+    attachDrawing(ui.ink, {
+      toLocal: (e) => [e.clientX + scrollX, e.clientY + scrollY],
+      getTool: () => tool,
+      preview: (sh) => { previewShape = sh; render(); },
+      onDone: (sh) => openPopover(null, null, sh),
+    });
     ui.go.onclick = sendAll;
     document.documentElement.appendChild(host);
     // Frameworks sometimes wipe <html> children on hydration; re-attach if removed.
@@ -164,7 +204,19 @@
     call({ type: 'sync', path: location.pathname }).then(applySync).catch(() => {});
   }
 
+  function setDrawing(on) {
+    if (on && active) setActive(false);
+    drawing = on;
+    if (!ui.drawBtn) return;
+    ui.drawBtn.classList.toggle('on', on);
+    ui.drawBtn.textContent = on ? 'Drawing… (Esc)' : 'Draw';
+    ui.ink.classList.toggle('on', on);
+    ui.tools.classList.toggle('on', on);
+    if (!on) { previewShape = null; closePopover(); }
+  }
+
   function setActive(on) {
+    if (on && drawing) setDrawing(false);
     active = on;
     ui.toggle.classList.toggle('on', on);
     ui.toggle.textContent = on ? 'Annotating… (Esc)' : 'Annotate';
@@ -184,14 +236,24 @@
   function draw() {
     const pins = [...drafts.map((d) => ({ ...d, state: 'draft' })), ...sent.filter((s) => s.path === location.pathname)];
     ui.layer.textContent = '';
+    const shapes = [...drafts.filter((d) => d.kind === 'draw').flatMap((d) => d.shapes), pending, previewShape].filter(Boolean);
+    if (shapes.length) {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('class', 'strokes');
+      svg.setAttribute('width', document.documentElement.scrollWidth);
+      svg.setAttribute('height', document.documentElement.scrollHeight);
+      for (const sh of shapes) svg.appendChild(shapeToSvg(sh));
+      ui.layer.appendChild(svg);
+    }
     for (const p of pins) {
-      const el = find(p); if (!el) continue;
-      const r = el.getBoundingClientRect();
+      let x, y, el = null;
+      if (p.kind === 'draw') { if (!p.box) continue; x = p.box.x; y = p.box.y; }
+      else { el = find(p); if (!el) continue; const r = el.getBoundingClientRect(); x = r.left + scrollX; y = r.top + scrollY; }
       const pin = document.createElement('div');
       pin.className = 'pin ' + (p.state === 'draft' ? '' : p.state);
       pin.textContent = p.n;
       pin.title = p.comment;
-      pin.style.left = r.left + scrollX + 'px'; pin.style.top = r.top + scrollY + 'px';
+      pin.style.left = x + 'px'; pin.style.top = y + 'px';
       pin.style.position = 'absolute';
       if (p.state === 'draft') pin.onclick = (e) => { e.stopPropagation(); openPopover(el, p); };
       ui.layer.appendChild(pin);
@@ -207,9 +269,12 @@
     ui.tag.textContent = `${el.tagName.toLowerCase()}${cls}  ${Math.round(r.width)}×${Math.round(r.height)}`;
   }
 
-  function openPopover(el, existing) {
+  // el: clicked element; existing: a draft being edited; shape: a fresh drawing waiting for its comment.
+  function openPopover(el, existing, shape) {
     closePopover();
-    const r = el.getBoundingClientRect();
+    pending = shape || null;
+    const b = shape ? shapeBox(shape) : existing?.kind === 'draw' ? existing.box : null;
+    const r = b ? { left: b.x - scrollX, bottom: b.y + b.h - scrollY } : el.getBoundingClientRect();
     const pop = document.createElement('div');
     pop.className = 'pop';
     const ta = h('textarea', { placeholder: 'What should change?' });
@@ -228,8 +293,9 @@
       if (existing) existing.comment = comment, Object.assign(drafts.find((d) => d.n === existing.n), { comment });
       else {
         const n = Math.max(0, ...drafts.map((d) => d.n), ...sent.map((s) => s.n)) + 1;
-        elRefs.set(n, el);
-        drafts.push({ n, selector: selectorFor(el), comment, path: location.pathname });
+        if (shape) drafts.push({ n, kind: 'draw', comment, path: location.pathname, shapes: [shape], box: shapeBox(shape) });
+        else { elRefs.set(n, el); drafts.push({ n, selector: selectorFor(el), comment, path: location.pathname }); }
+        pending = null;
       }
       persist(); closePopover(); render();
     };
@@ -242,20 +308,27 @@
       if (e.key === 'Escape') closePopover();
     });
     editing = pop;
+    if (shape) ta.focus(); // after a stroke, typing starts at once
     setTimeout(() => ta.focus(), 0);
   }
-  function closePopover() { editing?.remove(); editing = null; }
+  function closePopover() { editing?.remove(); editing = null; if (pending) { pending = null; render(); } }
 
   async function sendAll() {
     if (!drafts.length) return;
     const items = drafts.map((d) => {
+      if (d.kind === 'draw') {
+        const [best, ...rest] = elementsUnder(d.box);
+        return { n: d.n, kind: 'draw', comment: d.comment, path: d.path, box: d.box, shapes: d.shapes,
+          ...(best ? describe(best) : { selector: '', text: '', html: '', styles: {}, source: '' }),
+          under: rest.slice(0, 3).map((el) => ({ selector: selectorFor(el), source: sourceFor(el) })) };
+      }
       const el = find(d);
       return { n: d.n, comment: d.comment, path: d.path, ...(el ? describe(el) : { selector: d.selector, text: '', html: '', styles: {}, source: '' }) };
     });
     ui.go.disabled = true; ui.go.textContent = 'Sending…';
     try {
       const res = await call({ type: 'send', url: location.href, path: location.pathname, items });
-      drafts = []; persist(); elRefs.clear(); applySync(res); setActive(false);
+      drafts = []; persist(); elRefs.clear(); applySync(res); setActive(false); setDrawing(false);
     } catch (e) {
       ui.go.textContent = 'Failed. Retry'; ui.go.disabled = false; console.warn('[annotate]', e);
     }
@@ -281,6 +354,8 @@
   }, true);
   window.addEventListener('keydown', (e) => {
     if (e.altKey && e.shiftKey && e.code === 'KeyA') { e.preventDefault(); setActive(!active); }
+    else if (e.altKey && e.shiftKey && e.code === 'KeyD') { e.preventDefault(); setDrawing(!drawing); }
+    else if (e.key === 'Escape' && drawing && !editing) setDrawing(false);
     else if (e.altKey && e.shiftKey && e.code === 'KeyS') { e.preventDefault(); sendAll(); }
     else if (e.key === 'Escape' && active && !editing) setActive(false);
     else if (active && hoverEl && e.key === 'ArrowUp' && hoverEl.parentElement && hoverEl.parentElement !== document.body) {
@@ -296,6 +371,7 @@
     setStatus: (s) => host && setStatus(s),
     sync: (r) => { if (r) { sent = r.open || []; status = r.status || status; } if (host) applySync(r); },
     hide: (h) => { if (host) host.style.display = h ? 'none' : ''; },
+    capture: (on) => { if (host) { host.style.display = ''; host.classList.toggle('capturing', on); } }, // keep strokes, hide the rest
   };
   if (document.documentElement) mount(); else document.addEventListener('DOMContentLoaded', mount, { once: true });
 })();

@@ -1,6 +1,6 @@
 ---
 name: annotate
-description: Use when the user wants to give visual feedback on a running web app by clicking elements in a browser (Annotate toolbar) and have you apply the changes.
+description: Use when the user wants to give visual feedback on a running web app or desktop app by clicking elements, drawing on the screen, or snapshotting an app window (Annotate), and have you apply the changes.
 ---
 
 # Annotate
@@ -20,6 +20,9 @@ The user clicks elements in their running site, writes comments, and presses **S
    - `css` (`file:line selector`) → for style changes, edit that rule directly. Don't read the whole stylesheet.
    - Neither → search for `element_text` and the class names in `selector`.
    - Still unsure? `get_annotation_details(id, ["styles"])` (or `"html"`, `"screenshot"`). Ask only for what you need; screenshots cost the most.
+   - `kind: "draw"`: the user circled an area instead of clicking. The comment is about that area; `source`/`css`
+     describe the main element under the drawing (they may be missing over empty space). The image with the drawing is
+     attached. `get_annotation_details(id, ["under"])` lists a few more elements under it.
 3. Edit the code. Handle the whole batch before resolving.
 4. `resolve_annotation(ids, note)` with all the ids and a one-line note on what you changed. It reloads the page.
    If it returns `errors`, fix them.

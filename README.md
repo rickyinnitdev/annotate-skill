@@ -167,6 +167,11 @@ The toolbar shows the same thing: **AI working…** while the agent edits, then 
 
 **7. Repeat.** Send the next batch whenever you like. Each batch gets its own fresh session.
 
+**Draw instead of clicking.** When a comment is about an area rather than one element ("there's too much space here",
+"put a logo here"), click **Draw** (or `Alt+Shift+D`), pick **Pen**, **Ellipse** or **Arrow**, and circle the area.
+A comment box opens as soon as you let go. The agent gets a small screenshot with your drawing on it, plus the file,
+line and CSS of the element under the drawing.
+
 > **Tip:** you'll see new sessions appear in OpenCode's session list. You don't need to switch to them: watch the
 > browser instead. Amber pins mean the agent is working; green means done.
 
@@ -179,8 +184,10 @@ The toolbar shows the same thing: **AI working…** while the agent edits, then 
 | Select the parent element instead | Press `↑` while hovering, then `Enter` |
 | Save the comment | `Ctrl+Enter`, or **Save** |
 | Edit or delete a comment | Click its numbered pin |
+| Circle an area and comment on it | **Draw**, or `Alt+Shift+D`; choose Pen / Ellipse / Arrow, drag, type, `Ctrl+Enter` |
+| Throw away a drawing before saving | `Esc` or **Cancel** in its comment box |
 | Send all comments | **Send to AI**, or `Alt+Shift+S` |
-| Stop annotating | `Esc` |
+| Stop annotating or drawing | `Esc` |
 
 | Pin color | Meaning |
 |---|---|
