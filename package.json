@@ -2,11 +2,16 @@
   "name": "annotate-monorepo",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "setup": "npm install && npx playwright install chromium",
     "test": "node --test packages/*/test/*.test.js",
     "start": "node packages/annotate-mcp/src/server.js"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
 }

@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
-  "exports": { ".": "./src/index.js" },
-  "dependencies": { "playwright": "^1.64.1" }
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.64.1"
+  },
+  "license": "MIT"
 }

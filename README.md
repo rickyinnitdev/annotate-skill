@@ -297,3 +297,7 @@ skills/annotate/    instructions for the agent
   `shots/`, `push.log`, and `push.alive` (the plugin's heartbeat). Add `.annotate/` to your `.gitignore`.
 - **The OpenCode plugin** checks the queue once a second, which costs no tokens. When a batch hasn't been picked up within about a second,
   it creates a session titled `Annotate: <first comment>` and queues a short message there. It never interrupts a running turn.
+
+## License
+
+[MIT](LICENSE). Free to use, change and share; keep the copyright notice.
