@@ -1,0 +1,7 @@
+{
+  "name": "opencode-annotate-push",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenCode 2.x plugin: pushes Annotate feedback into the chat when the agent isn't waiting",
+  "exports": { "./server": "./server.js" }
+}

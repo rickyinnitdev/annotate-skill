@@ -11,7 +11,8 @@ export class Queue extends EventEmitter {
     this.file = join(dir, 'queue.json');
     mkdirSync(join(dir, 'shots'), { recursive: true });
     try { this.items = JSON.parse(readFileSync(this.file, 'utf8')); } catch { this.items = []; }
-    this.items = this.items.filter((a) => a.status !== 'done');
+    // A new server process re-delivers everything still open.
+    this.items = this.items.filter((a) => a.status !== 'done').map(({ deliveredAt, ...a }) => a);
     this.seq = this.items.reduce((m, a) => Math.max(m, Number(a.id.slice(1)) || 0), 0);
     this.delivered = new Set(); // ids handed to the agent by THIS process
   }
@@ -28,7 +29,11 @@ export class Queue extends EventEmitter {
   open() { return this.items.filter((a) => a.status !== 'done'); }
   /** Pending annotations not yet given to the agent by this process. */
   undelivered() { return this.open().filter((a) => !this.delivered.has(a.id)); }
-  markDelivered(list) { for (const a of list) this.delivered.add(a.id); }
+  markDelivered(list) {
+    // deliveredAt is persisted so the OpenCode push plugin knows the agent already has these.
+    for (const a of list) { this.delivered.add(a.id); a.deliveredAt = Date.now(); }
+    this.save();
+  }
 
   resolve(ids, note) {
     const done = [];

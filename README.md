@@ -36,7 +36,19 @@ claude mcp add annotate -- node /path/to/Annotate/packages/annotate-mcp/src/serv
 
 On Windows, use a path like `C:\\path\\to\\Annotate\\packages\\annotate-mcp\\src\\server.js`.
 
-Copy `skills/annotate/SKILL.md` into your agent's skills folder. Then tell it: *"open localhost:3000 and wait for my feedback"*.
+Copy `skills/annotate/SKILL.md` into your agent's skills folder.
+
+**OpenCode 2.x: make feedback arrive automatically (recommended).** An agent only receives annotations while it is waiting for them,
+and some models (DeepSeek, for example) end their turn instead of waiting. The bundled plugin fixes this: if annotations sit
+undelivered for 3 seconds, it sends a short message into your newest OpenCode session for that project,
+so the agent picks them up without you asking. It uses OpenCode's `delivery: "queue"`, so it never interrupts a turn in progress.
+Add it to `~/.config/opencode/opencode.json`, then restart OpenCode:
+
+```json
+{ "plugin": ["/path/to/Annotate/packages/opencode-plugin"] }
+```
+
+Each message it sends is logged in `.annotate/push.log`. Then tell it: *"open localhost:3000 and wait for my feedback"*.
 
 ## Using the toolbar
 
