@@ -13,7 +13,11 @@ import { Queue } from './queue.js';
 const PROJECT = process.env.ANNOTATE_PROJECT_DIR || process.cwd();
 const DIR = join(PROJECT, '.annotate');
 const TOKEN_BUDGET = Number(process.env.ANNOTATE_TOKEN_BUDGET || 500);
-const TOOLBAR = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'toolbar.js'), 'utf8');
+const SRC = dirname(fileURLToPath(import.meta.url));
+const TOOLBAR_SRC = readFileSync(join(SRC, 'toolbar.js'), 'utf8');
+const DRAW_SRC = readFileSync(join(SRC, 'draw.js'), 'utf8');
+// One init script: draw.js helpers + the toolbar, in a private scope. SNAP_ORIGIN = the App page (no toolbar there).
+const buildToolbar = (snapOrigin) => `(() => {\nconst SNAP_ORIGIN = ${JSON.stringify(snapOrigin)};\n${DRAW_SRC}\n${TOOLBAR_SRC}\n})();`;
 // Only layout problems really need eyes; "make it purple" or "bigger" do not. Set ANNOTATE_IMAGES=0 for text-only models.
 const VISUAL = /\b(misalign\w*|not aligned|alignment|overlap\w*|crooked|cut off|clipped|off[- ]cent(er|re)|uneven|squished|stretched|broken|looks (off|wrong|weird|bad|broken)|layout)\b/i;
 const IMAGES = process.env.ANNOTATE_IMAGES !== '0';
@@ -40,7 +44,7 @@ async function ensureBrowser() {
   conn = await connect();
   const { context } = conn;
   await context.exposeBinding('__annotate_send', (src, msg) => onToolbar(src.page, msg));
-  await context.addInitScript({ content: TOOLBAR });
+  await context.addInitScript({ content: buildToolbar(null) });
   const watch = (page) => {
     page.on('console', (m) => m.type() === 'error' && pushErr(m.text()));
     page.on('pageerror', (e) => pushErr(e.message));
