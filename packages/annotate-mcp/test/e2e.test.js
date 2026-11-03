@@ -37,7 +37,7 @@ test('annotate loop', { timeout: 90000 }, async () => {
   };
   try {
     const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-    assert.deepEqual(tools, ['get_annotation_details', 'open', 'resolve_annotation', 'wait_for_feedback']);
+    assert.deepEqual(tools, ['get_annotation_details', 'open', 'open_app', 'resolve_annotation', 'wait_for_feedback']);
 
     assert.equal((await call('open', { url })).json.ok, true);
     assert.equal((await call('wait_for_feedback', { timeout_sec: 10 })).json.status, 'waiting');

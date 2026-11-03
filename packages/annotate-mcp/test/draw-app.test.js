@@ -83,6 +83,25 @@ test('draw mode and app snapshots', { timeout: 240000 }, async (t) => {
       const res = await h.call('resolve_annotation', { ids: [a.id], wait: false });
       assert.equal(res.json.errors, undefined, 'no page errors');
     });
+
+    await t.test('open_app serves snap page', async () => {
+      const r = (await h.call('open_app')).json;
+      assert.equal(r.ok, true);
+      assert.match(r.next, /Choose a window|wait_for_feedback/);
+      const snap = context.pages().find((p) => /\/snap\?t=/.test(p.url()));
+      assert.ok(snap, 'snap page open');
+      await snap.waitForLoadState('domcontentloaded');
+      assert.equal(await snap.title(), 'Annotate · App');
+      assert.equal(await snap.evaluate(() => !!document.querySelector('meta[name=annotate-snap]')), true);
+      assert.equal(await snap.evaluate(() => !!document.querySelector('annotate-toolbar')), false, 'no toolbar on the App page');
+      const origin = new URL(snap.url()).origin;
+      assert.equal((await fetch(origin + '/snap')).status, 403, 'token required');
+      assert.equal((await fetch(origin + '/snap?t=nope')).status, 403);
+      assert.equal((await fetch(origin + '/draw.js')).status, 200);
+      assert.equal((await fetch(origin + '/etc/passwd')).status, 404);
+      assert.equal((await h.call('open_app')).json.ok, true, 'second call reuses the page');
+      assert.equal(context.pages().filter((p) => /\/snap\?t=/.test(p.url())).length, 1);
+    });
   } finally {
     await h.close();
   }

@@ -7,8 +7,10 @@ import { z } from 'zod';
 import { readFileSync, existsSync, writeFileSync, statSync } from 'node:fs';
 import { join, dirname, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomBytes } from 'node:crypto';
 import { connect, getLock } from 'browser-core';
 import { Queue } from './queue.js';
+import { startSnapServer } from './snap-server.js';
 
 const PROJECT = process.env.ANNOTATE_PROJECT_DIR || process.cwd();
 const DIR = join(PROJECT, '.annotate');
@@ -36,6 +38,8 @@ const SHOT_W = 480, SHOT_H = 360; // max screenshot size in px; a few hundred to
 const queue = new Queue(DIR);
 const log = (...a) => process.stderr.write(`[annotate] ${a.join(' ')}\n`);
 let conn = null;        // { browser, context, session }
+const SNAP_TOKEN = randomBytes(16).toString('hex');
+let snap = null;        // { origin, url } of the App page server, started with the browser
 let status = 'idle';    // idle | waiting | working  (shown as a dot in the toolbar)
 let recentDone = [];    // briefly shown green in the toolbar
 const consoleErrors = [];
@@ -43,10 +47,11 @@ const consoleErrors = [];
 // ---------- browser ----------
 async function ensureBrowser() {
   if (conn?.browser.isConnected()) return conn;
+  snap ??= await startSnapServer({ token: SNAP_TOKEN });
   conn = await connect();
   const { context } = conn;
   await context.exposeBinding('__annotate_send', (src, msg) => onToolbar(src.page, msg));
-  await context.addInitScript({ content: buildToolbar(null) });
+  await context.addInitScript({ content: buildToolbar(snap.origin) });
   const watch = (page) => {
     page.on('console', (m) => m.type() === 'error' && pushErr(m.text()));
     page.on('pageerror', (e) => pushErr(e.message));
@@ -237,6 +242,25 @@ server.registerTool('open', {
       next: isPush() ? 'Tell the user: "✅ Annotate ready. Click elements, comment, then Send to AI." and end your turn.'
         : 'Call wait_for_feedback. Never end your turn while the user annotates.' });
   } catch (e) { return fail('open', e); }
+});
+
+server.registerTool('open_app', {
+  description: 'Open the Annotate App page to snapshot any app window on screen, draw on it and comment.',
+  inputSchema: {},
+}, async () => {
+  try {
+    const { context, session } = await ensureBrowser();
+    if ((await getLock(session)).holder === 'human') return reply('open_app', { status: 'human_has_control' });
+    let page = context.pages().find((p) => p.url().startsWith(snap.origin + '/snap'));
+    if (!page) {
+      page = context.pages().find((p) => p.url() === 'about:blank') || (await context.newPage());
+      await page.goto(snap.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    }
+    await page.bringToFront();
+    return reply('open_app', { ok: true, pending: queue.open().length,
+      next: isPush() ? 'Tell the user: "✅ Annotate ready. Choose a window, capture, draw and comment, then Send to AI." and end your turn.'
+        : 'Tell the user: "✅ Annotate ready. Choose a window, capture, draw and comment, then Send to AI." Then call wait_for_feedback. Never end your turn while the user annotates.' });
+  } catch (e) { return fail('open_app', e); }
 });
 
 async function waitForFeedback(tool, timeout_sec, extra) {
