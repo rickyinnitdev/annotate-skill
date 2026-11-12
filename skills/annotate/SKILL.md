@@ -9,7 +9,7 @@ The user clicks elements in their running site (or circles areas, or snapshots a
 
 ## Start
 `open(url)`: the user's dev server, e.g. `http://localhost:4321`. A browser window opens with the toolbar.
-- If the result says `next: ...end your turn...` (push mode), tell the user it's ready and **end your turn**. Each batch they send arrives later as a new message, usually in a new session.
+- If the result says `next: ...end your turn...` (push mode), tell the user it's ready and **end your turn**. Each batch they send arrives later as a new message in this chat (or in a new session, if they set that up).
 - Otherwise, call `wait_for_feedback()`.
 
 `open_app()`: for desktop apps or anything that isn't a web page. It opens the App page where the user snapshots a window, draws and comments. Same `next` rules as `open`.

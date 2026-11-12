@@ -21,7 +21,7 @@ Your agent (OpenCode, Claude Code, or any MCP-compatible agent) finds the right 
 - **Uses your default browser** (Chrome, Edge, Brave, Vivaldi, Chromium or Opera). Otherwise it uses a bundled Chromium.
 - **Finds the code for you:** file and line for Astro, React, Vue and Svelte, plus the exact CSS rule (file:line) that styles each element.
 - **Any app, not just websites:** snapshot any window on your screen (Qt, GTK, Flutter, Electron, Tauri, native…), draw on it and comment.
-- **Cheap on tokens:** a typical annotation is about 60 tokens. Screenshots are small and only sent when needed. With OpenCode, each batch starts a fresh session, so cost doesn't grow over time.
+- **Cheap on tokens:** a typical annotation is about 60 tokens. Screenshots are small and only sent when needed.
 
 ---
 
@@ -61,7 +61,7 @@ Annotate has three parts. Only the first two are required.
 |---|---|---|
 | **MCP server** | `packages/annotate-mcp` | Opens the browser and toolbar and gives your comments to the agent. **Required.** |
 | **Skill** | `skills/annotate/SKILL.md` | Teaches the agent the annotate loop. **Required.** |
-| **OpenCode plugin** | `packages/opencode-plugin` | Delivers comments automatically and starts a fresh, cheap session for each batch. **Recommended for OpenCode.** |
+| **OpenCode plugin** | `packages/opencode-plugin` | Delivers each batch to your chat the moment you press **Send to AI**, so you never have to ask. **Recommended for OpenCode.** |
 
 ### OpenCode 2.x (recommended setup)
 
@@ -93,11 +93,11 @@ opencode mcp list              # should show: ✓ annotate connected
 On Windows, use paths like `C:/Users/you/annotate-skill/...` in the JSON (forward slashes work), copy the skill folder in Explorer,
 and end the background service by closing OpenCode and ending any `opencode` process in Task Manager.
 
-> **Why the plugin and `ANNOTATE_PUSH`?** An agent can only receive your comments while it's waiting for them, and some models
-> (DeepSeek, for example) stop waiting. With the plugin, nothing depends on the model: each batch you send starts a **new session**
-> containing just that batch, plus a one-line summary of the last few rounds so "undo that" still works.
-> While the plugin runs, the agent finishes after each batch instead of waiting. This switches on automatically; there's nothing to configure.
-> To keep everything in one session instead, see [Settings](#7-settings).
+> **Why the plugin?** Without it, an agent only receives your comments while it's waiting for them, and some models
+> (DeepSeek, for example) stop waiting, so you end up typing *"check my annotations"*. With the plugin, nothing depends on the model:
+> each batch you send arrives as a new message **in the chat where you opened Annotate**, and the agent starts on it right away.
+> If the agent is still busy, the batch waits until it finishes. This switches on automatically; there's nothing to configure.
+> To start a fresh, cheaper session for every batch instead, see [Settings](#7-settings).
 
 ### Claude Code
 
@@ -143,7 +143,7 @@ Press `Ctrl+Enter` to save. A purple pin **1** appears. Add more:
 
 **5. Press Send to AI** (or `Alt+Shift+S`). The pins turn amber.
 
-**6. Watch it work.** With OpenCode and the plugin, a new session named **"Annotate: change the price to $100 (+2)"** starts.
+**6. Watch it work.** With OpenCode and the plugin, your batch appears in the chat as a new message and the agent starts right away.
 It receives something like this (about 60 tokens per comment):
 
 ```json
@@ -168,15 +168,14 @@ The agent finishes every batch the same way, so you always know where things sta
 
 The toolbar shows the same thing: **AI working…** while the agent edits, then **Done ✓ Ready for the next one**.
 
-**7. Repeat.** Send the next batch whenever you like. Each batch gets its own fresh session.
+**7. Repeat.** Send the next batch whenever you like. It lands in the same chat.
 
 **Draw instead of clicking.** When a comment is about an area rather than one element ("there's too much space here",
 "put a logo here"), click **Draw** (or `Alt+Shift+D`), pick **Pen**, **Ellipse** or **Arrow**, and circle the area.
 A comment box opens as soon as you let go. The agent gets a small screenshot with your drawing on it, plus the file,
 line and CSS of the element under the drawing.
 
-> **Tip:** you'll see new sessions appear in OpenCode's session list. You don't need to switch to them: watch the
-> browser instead. Amber pins mean the agent is working; green means done.
+> **Tip:** you can also just watch the browser. Amber pins mean the agent is working; green means done.
 
 ## 4. Toolbar reference
 
@@ -296,19 +295,21 @@ Set these in the `env` block of the MCP server config:
 | `BROWSER_CORE_HOME` | `~/.browser-core` | Where the browser profile and session state live |
 | `BROWSER_CORE_HEADLESS` | off | `1` = no visible window (CI and tests) |
 
-**Keep one session instead of a new one per batch** (OpenCode plugin). Create `my-site/.annotate/settings.json`:
+**Where batches go** (OpenCode plugin). By default each batch goes to the chat that last used Annotate
+(remembered in `.annotate/session.json`). To start a **new session for every batch** instead, create `my-site/.annotate/settings.json`:
 ```json
-{ "newSession": false }
+{ "newSession": true }
 ```
-The agent then waits between batches again, and every batch goes to your newest session.
-This costs more tokens as the conversation grows, but the agent remembers everything from earlier rounds.
+Each round then costs about the same small amount, because the conversation doesn't grow. The new session gets a one-line
+summary of the last few rounds, so "undo that" still works. The work happens in the new session, not the chat you're looking at.
 
 ## 8. Troubleshooting
 
 | Problem | Fix |
 |---|---|
 | `opencode mcp list` doesn't show annotate | Check the path in `command`, then run `pkill -f "serve --service"` and start OpenCode again |
-| Nothing happens after **Send to AI** (OpenCode) | Look in `my-site/.annotate/push.log`. If it's missing, the plugin isn't loaded: check the `plugin` path and restart the background service |
+| Nothing happens after **Send to AI** (OpenCode) | Look in `my-site/.annotate/push.log`. If it's missing, the plugin isn't loaded: check the `plugin` path and restart the background service. `sent a1 to ses_…` shows which session got the batch |
+| Batches go to the wrong chat (OpenCode) | They go to the chat that last used Annotate. Ask the right chat to *"open annotate"* once, or delete `.annotate/session.json` |
 | Nothing happens (other agents) | Tell the agent *"check annotations"*. Everything you sent is queued in `.annotate/queue.json` |
 | Wrong browser opens | Set `BROWSER_CORE_BROWSER`, for example `chrome`. Firefox and Safari can't be automated this way, so Annotate uses Chromium for them |
 | You're logged out on the Annotate window | It uses its own profile (`~/.browser-core/profile`), because Chrome blocks automation on your main profile. Log in once; it remembers you |
@@ -336,9 +337,10 @@ skills/annotate/    instructions for the agent
 - **The App page** is served by the MCP server on `127.0.0.1` behind a random token. Frames never leave your machine except
   as the small crops (and, if the agent asks, the full frame) sent to your agent.
 - **The queue** lives in your project at `.annotate/`: `queue.json`, a readable `ANNOTATIONS.md`, `history.json` (the last 5 rounds),
-  `shots/`, `push.log`, and `push.alive` (the plugin's heartbeat). Add `.annotate/` to your `.gitignore`.
+  `shots/`, `push.log`, `push.alive` (the plugin's heartbeat) and `session.json` (the chat that gets new batches). Add `.annotate/` to your `.gitignore`.
 - **The OpenCode plugin** checks the queue once a second, which costs no tokens. When a batch hasn't been picked up within about a second,
-  it creates a session titled `Annotate: <first comment>` and queues a short message there. It never interrupts a running turn.
+  it queues a short message in the chat that last called an Annotate tool (or, with `newSession: true`, in a new session titled
+  `Annotate: <first comment>`). It never interrupts a running turn.
 
 ## License
 

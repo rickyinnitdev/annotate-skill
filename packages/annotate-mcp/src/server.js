@@ -25,7 +25,7 @@ const buildToolbar = (snapOrigin) => `(() => {\nconst SNAP_ORIGIN = ${JSON.strin
 // Only layout problems really need eyes; "make it purple" or "bigger" do not. Set ANNOTATE_IMAGES=0 for text-only models.
 const VISUAL = /\b(misalign\w*|not aligned|alignment|overlap\w*|crooked|cut off|clipped|off[- ]cent(er|re)|uneven|squished|stretched|broken|looks (off|wrong|weird|bad|broken)|layout)\b/i;
 const IMAGES = process.env.ANNOTATE_IMAGES !== '0';
-// Push mode: the OpenCode plugin delivers each batch (usually into a fresh session), so agents end their turn
+// Push mode: the OpenCode plugin delivers each batch as a new message, so agents end their turn
 // instead of waiting. On automatically while the plugin is running: it touches .annotate/push.alive every second.
 // ANNOTATE_PUSH=1 forces it on, ANNOTATE_PUSH=0 forces it off.
 function isPush() {
