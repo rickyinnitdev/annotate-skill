@@ -4,7 +4,7 @@
 
 Open your site in a browser, click any element (or circle an area), type a comment like *"make this button purple"*, and press **Send to AI**.
 Building a desktop app instead? Snapshot its window, draw on it and comment the same way.
-Your agent (OpenCode, Claude Code, or any MCP-compatible agent) finds the right file and line, edits the code, and the page reloads with the change.
+Your agent (OpenCode, Claude Code, Antigravity, or any MCP-compatible agent) finds the right file and line, edits the code, and the page reloads with the change.
 
 ```
  Browser                                   Your agent
@@ -26,20 +26,165 @@ Your agent (OpenCode, Claude Code, or any MCP-compatible agent) finds the right 
 ---
 
 ## Contents
-1. [Setup](#1-setup)
-2. [Connect your agent](#2-connect-your-agent)
-3. [Using it: a walkthrough](#3-using-it-a-walkthrough)
-4. [Toolbar reference](#4-toolbar-reference)
-   - [Annotating desktop apps](#annotating-desktop-apps)
-5. [How the agent finds your code](#5-how-the-agent-finds-your-code)
-6. [Saving tokens](#6-saving-tokens)
+1. [How It Works](#1-how-it-works)
+   - [Architecture Overview](#architecture-overview)
+   - [The Annotation Loop](#the-annotation-loop)
+   - [Source Mapping](#source-mapping)
+   - [Queue and State Management](#queue-and-state-management)
+   - [Browser Management](#browser-management)
+2. [Setup](#2-setup)
+3. [Connect Your Agent](#3-connect-your-agent)
+   - [OpenCode 2.x (recommended setup)](#opencode-2x-recommended-setup)
+   - [Claude Code](#claude-code)
+   - [Antigravity (AGY)](#antigravity-agy)
+   - [Other MCP Agents](#other-mcp-agents)
+   - [CLI / Direct Use (No Agent)](#cli--direct-use-no-agent)
+4. [Using It: A Walkthrough](#4-using-it-a-walkthrough)
+5. [Toolbar Reference](#5-toolbar-reference)
+   - [Annotating Desktop Apps](#annotating-desktop-apps)
+6. [Saving Tokens](#6-saving-tokens)
 7. [Settings](#7-settings)
 8. [Troubleshooting](#8-troubleshooting)
-9. [How it works](#9-how-it-works)
 
 ---
 
-## 1. Setup
+## 1. How It Works
+
+### Architecture Overview
+
+Annotate is a monorepo with three packages:
+
+```
+packages/
+  browser-core/       Shared browser daemon — one Chromium per user, CDP, control lock
+  annotate-mcp/       MCP server with 5 tools, injected toolbar, App page, Babel plugin
+  opencode-plugin/    OpenCode 2.x plugin — delivers batches into the right chat session
+skills/annotate/      SKILL.md — teaches any agent the annotate loop
+```
+
+The system is made of four layers that connect the user's browser to the agent's editing session:
+
+```
+┌──────────────┐     ┌──────────────────┐     ┌──────────────────────┐     ┌──────────────┐
+│   Browser    │     │   MCP Server     │     │   Queue (.annotate/) │     │    Agent     │
+│  + Toolbar   │ ──▶ │  (annotate-mcp)  │ ──▶ │  queue.json          │ ──▶ │  (any MCP    │
+│  (shadow DOM)│     │  5 tools, stdio  │     │  ANNOTATIONS.md      │     │   client)    │
+└──────────────┘     └──────────────────┘     │  history.json        │     └──────────────┘
+                             │                │  shots/              │
+                     ┌───────┴──────┐         └──────────────────────┘
+                     │ browser-core │
+                     │  daemon      │
+                     │  (CDP, lock) │
+                     └──────────────┘
+```
+
+**1. browser-core** — A background daemon that owns one visible Chromium instance per user. It:
+- Launches your default Chromium-family browser (or a bundled Chromium) with a persistent profile stored in `~/.browser-core/profile`.
+- Exposes its Chrome DevTools Protocol (CDP) endpoint on `127.0.0.1` only — nothing leaves your machine.
+- Provides a token-protected HTTP API with a **control lock** (`/lock`): either `human` or `agent` holds the browser. The agent pauses input when the human is in control.
+- Session state is stored in `~/.browser-core/session.json` (port, token, CDP URL). Other tools can share the same browser instance.
+- Closing the browser window stops the daemon; the next `open` call relaunches it automatically.
+
+**2. annotate-mcp** — The MCP server (stdio transport) that:
+- Injects the Annotate toolbar into every page via Playwright's `addInitScript`. The toolbar runs in a **closed shadow DOM** (`attachShadow({ mode: 'closed' })`), so your site's CSS can't affect it and it can't affect your site. Works with strict Content Security Policies and Trusted Types.
+- Provides **5 MCP tools**: `open`, `open_app`, `wait_for_feedback`, `get_annotation_details`, `resolve_annotation`.
+- Receives annotations from the toolbar through an exposed browser binding (`window.__annotate_send`).
+- Resolves source file paths and CSS rule line numbers so the agent knows exactly where to edit.
+- Takes small, targeted screenshots (max 480×360 px JPEG) only when needed (layout-related comments or drawings).
+- Serves the **App page** (for desktop app snapshots) on `127.0.0.1` behind a random token.
+
+**3. Queue** — A durable, file-based annotation queue stored in your project at `<project>/.annotate/`:
+
+| File | Purpose |
+|---|---|
+| `queue.json` | All open annotations (atomically written via rename) |
+| `ANNOTATIONS.md` | Human-readable list of unresolved comments |
+| `history.json` | Last 5 resolved annotations (for "undo that" context) |
+| `shots/` | Screenshot crops (JPEG) |
+| `push.log` | OpenCode plugin delivery log |
+| `push.alive` | Heartbeat file (plugin touches it every second) |
+| `session.json` | Which OpenCode chat session to deliver batches to |
+
+Nothing is lost when the agent's wait times out, the MCP server restarts, or a new agent session starts. Finished annotations are dropped from storage and never come back in results.
+
+**4. OpenCode plugin** (optional) — Polls `queue.json` once per second (no tokens spent). When annotations aren't picked up within ~1.2 seconds, it queues them as a message in the chat that last used Annotate. The agent doesn't need to be "waiting" — batches arrive as new messages. With `{ "newSession": true }` in `.annotate/settings.json`, each batch gets its own fresh session for minimal token cost.
+
+### The Annotation Loop
+
+The core workflow is a simple loop driven by the agent and the SKILL.md instructions:
+
+```
+Agent calls open(url) or open_app()
+          │
+          ▼
+    ┌─── wait_for_feedback() ◀───────────────────────────┐
+    │     blocks until user presses "Send to AI"          │
+    │           │                                         │
+    │           ▼                                         │
+    │     Returns annotations:                            │
+    │       [{id, comment, selector, source, css, ...}]   │
+    │           │                                         │
+    │           ▼                                         │
+    │     Agent edits the code                            │
+    │       - Uses source (file:line) directly            │
+    │       - Uses css (file:line selector) for styles    │
+    │       - Falls back to element_text / selector       │
+    │       - Can call get_annotation_details() for more  │
+    │           │                                         │
+    │           ▼                                         │
+    └─── resolve_annotation(ids, note)                    │
+           Reloads the page, returns console errors       │
+           Waits for next batch (or ends turn in push)  ──┘
+```
+
+**Push mode vs. Wait mode:**
+- **Push mode** (OpenCode with plugin): The agent ends its turn after each batch. The plugin delivers the next batch as a new message. No model dependency — works with any LLM.
+- **Wait mode** (Claude Code, other agents): The agent stays in a `wait_for_feedback` → `resolve_annotation` loop. It never ends its turn while the user is annotating.
+
+### Source Mapping
+
+Each annotation tells the agent *where* to look, so it doesn't have to search the codebase:
+
+| Field | Example | How it's found |
+|---|---|---|
+| `source` | `src/pages/index.astro:58` | Reads framework dev-mode attributes: `data-source` (Babel plugin), `data-astro-source-file` (Astro), `__svelte_meta` (Svelte), `__vueParentComponent` (Vue), `__reactFiber$` (React ≤18) |
+| `css` | `src/styles/global.css:1431 .shop-tag` | Walks `document.styleSheets`, matches rules against the element, then finds the rule's line number in the source file on disk |
+| `element_text` | `Open Sat & Sun` | `el.innerText`, clipped to 200 chars |
+| `selector` | `div.shop-tag` | Generated from the DOM: prefers `id`, `data-testid`, `aria-label`, then walks up building a unique path; strips framework hash classes |
+
+For **React 19** (or the most reliable mapping in any React version), add the included Babel plugin:
+
+```js
+// vite.config.js
+import react from '@vitejs/plugin-react';
+export default defineConfig(({ mode }) => ({
+  plugins: [react({ babel: { plugins: mode === 'development' ? ['ANNOTATE_DIR/packages/annotate-mcp/src/babel-plugin.cjs'] : [] } })],
+}));
+```
+
+Every HTML element then gets a `data-source="src/components/Hero.tsx:12"` attribute in development.
+
+### Queue and State Management
+
+The queue uses **atomic writes** (write to `.tmp`, then `rename`) so it's never corrupted even if the process crashes mid-write. Key behaviors:
+
+- On MCP server restart, all open annotations are re-delivered (the `deliveredAt` timestamp is cleared).
+- The OpenCode plugin uses `deliveredAt` + a 1.2-second grace period to decide whether the MCP server's agent already picked up annotations or if they need pushing.
+- `history.json` keeps the last 5 resolved annotations so a fresh session can reference them ("undo that" still works across sessions).
+- `ANNOTATIONS.md` is regenerated on every write — you can always `cat .annotate/ANNOTATIONS.md` to see what's open.
+
+### Browser Management
+
+**browser-core** manages the shared browser daemon:
+
+1. **Browser selection**: Checks `BROWSER_CORE_BROWSER` env var, or detects your OS default. Supports Chrome, Edge, Brave, Vivaldi, Chromium, Opera. Firefox and Safari don't support CDP, so they fall back to bundled Chromium.
+2. **Persistent profile**: Stores its profile in `~/.browser-core/profile` (separate from your daily profile, because Chrome blocks automation on active profiles). Log in once to sites; it remembers you.
+3. **One daemon per user**: Starts as a detached process. The client polls for `session.json` to appear. Multiple MCP servers can share the same browser.
+4. **Security**: The HTTP API requires a random token (stored in `session.json`, mode `0600`). CDP listens on `127.0.0.1` only. The App page requires a separate per-process token.
+
+---
+
+## 2. Setup
 
 You need **Node.js 20 or newer** and **git**.
 
@@ -53,7 +198,7 @@ npm test               # optional: runs the end-to-end test (about 45 s, headles
 Note the full path of this folder (`pwd` on Linux/macOS, `cd` on Windows). The steps below call it `ANNOTATE_DIR`,
 for example `/home/you/annotate-skill` or `C:\Users\you\annotate-skill`.
 
-## 2. Connect your agent
+## 3. Connect Your Agent
 
 Annotate has three parts. Only the first two are required.
 
@@ -109,12 +254,122 @@ mkdir -p ~/.claude/skills/annotate && cp ANNOTATE_DIR/skills/annotate/SKILL.md ~
 There's no plugin for Claude Code. The agent stays in the loop by waiting: after each change, `resolve_annotation` waits for your next batch.
 If it ever stops, say *"check annotations"*. Nothing you sent is lost.
 
-### Other MCP agents
+### Antigravity (AGY)
+
+Annotate works with Antigravity as an MCP server. Add it to your MCP config:
+
+**Option A: Global config** — Add to `~/.gemini/antigravity/settings.json` (or your user-level MCP config):
+
+```json
+{
+  "mcpServers": {
+    "annotate": {
+      "command": "node",
+      "args": ["ANNOTATE_DIR/packages/annotate-mcp/src/server.js"]
+    }
+  }
+}
+```
+
+**Option B: Workspace config** — Create `.gemini/settings.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "annotate": {
+      "command": "node",
+      "args": ["ANNOTATE_DIR/packages/annotate-mcp/src/server.js"]
+    }
+  }
+}
+```
+
+Then copy the skill:
+
+```bash
+# Global (available in all projects)
+mkdir -p ~/.gemini/antigravity/skills/annotate
+cp ANNOTATE_DIR/skills/annotate/SKILL.md ~/.gemini/antigravity/skills/annotate/
+
+# Or per-workspace (in your project root)
+mkdir -p .gemini/skills/annotate
+cp ANNOTATE_DIR/skills/annotate/SKILL.md .gemini/skills/annotate/
+```
+
+Antigravity uses wait mode (no push plugin needed). Tell the agent:
+> open http://localhost:4321 with annotate
+
+If it ever stops waiting, say *"check annotations"*.
+
+### Other MCP Agents
 
 Run `node ANNOTATE_DIR/packages/annotate-mcp/src/server.js` as a **stdio** MCP server from your project folder,
 and add the contents of `SKILL.md` to the agent's instructions.
 
-## 3. Using it: a walkthrough
+The MCP server exposes these 5 tools:
+
+| Tool | Description |
+|---|---|
+| `open(url)` | Opens a URL in the shared browser with the Annotate toolbar injected |
+| `open_app()` | Opens the App page for desktop app window snapshots |
+| `wait_for_feedback(timeout_sec?)` | Blocks until the user presses "Send to AI"; returns annotations |
+| `get_annotation_details(id, fields)` | Fetches heavy data on demand: `html`, `styles`, `rect`, `text`, `screenshot`, `under`, `box`, `full` |
+| `resolve_annotation(ids, note, wait?, timeout_sec?)` | Marks annotations done, reloads the page, returns console errors and optionally waits for next batch |
+
+### CLI / Direct Use (No Agent)
+
+You can also start the MCP server directly for inspection or debugging:
+
+```bash
+# Start the server (it speaks MCP over stdio)
+cd ~/my-project
+node ANNOTATE_DIR/packages/annotate-mcp/src/server.js
+
+# Or use the npm script from the monorepo
+cd ANNOTATE_DIR
+npm start
+```
+
+**Inspect the queue** without an agent:
+
+```bash
+# See all open annotations
+cat my-project/.annotate/ANNOTATIONS.md
+
+# See the raw queue
+cat my-project/.annotate/queue.json | npx json
+
+# See recent history (last 5 resolved)
+cat my-project/.annotate/history.json
+
+# Check OpenCode plugin delivery log
+cat my-project/.annotate/push.log
+```
+
+**Run the test suite:**
+
+```bash
+cd ANNOTATE_DIR
+npm test                          # all tests (~45s, headless)
+node --test packages/annotate-mcp/test/e2e.test.js    # just the e2e test
+node --test packages/annotate-mcp/test/draw-unit.test.js
+node --test packages/annotate-mcp/test/draw-app.test.js
+node --test packages/opencode-plugin/test/push.test.js
+```
+
+**Environment variables** for the MCP server (can also be set in your agent's MCP `env` config):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ANNOTATE_PROJECT_DIR` | `process.cwd()` | Project root where `.annotate/` lives |
+| `ANNOTATE_IMAGES` | on | `0` = never attach screenshots (text-only models) |
+| `ANNOTATE_PUSH` | auto | `1` = force push mode; `0` = force wait mode |
+| `ANNOTATE_TOKEN_BUDGET` | `500` | Warn in stderr when a result exceeds this many tokens |
+| `BROWSER_CORE_BROWSER` | `default` | `default`, `bundled`, `chrome`, `msedge`, `brave`, `vivaldi`, `chromium`, `opera`, or a path |
+| `BROWSER_CORE_HOME` | `~/.browser-core` | Where the browser profile and daemon state live |
+| `BROWSER_CORE_HEADLESS` | off | `1` = no visible window (CI / tests) |
+
+## 4. Using It: A Walkthrough
 
 **1. Start your site's dev server**, as usual:
 ```bash
@@ -177,7 +432,7 @@ line and CSS of the element under the drawing.
 
 > **Tip:** you can also just watch the browser. Amber pins mean the agent is working; green means done.
 
-## 4. Toolbar reference
+## 5. Toolbar Reference
 
 | Action | How |
 |---|---|
@@ -208,7 +463,7 @@ The **status label** next to the dot tells you what the agent is doing:
 **Writing good comments:** comments always refer to the element you clicked. *"Make this bold"* on a heading changes that heading only.
 To change every heading, say so: *"make all section headings bold"*.
 
-### Annotating desktop apps
+### Annotating Desktop Apps
 
 For anything that isn't a web page, ask your agent:
 > open the annotate app page
@@ -237,34 +492,7 @@ Your browser shows its usual "sharing" indicator while it's on.
 - **Tauri apps:** use App snapshots. Opening a Tauri dev URL in a normal browser often breaks, because the Tauri APIs aren't there.
 - **Text-only models** (`ANNOTATE_IMAGES=0`) get no image, only the comment, the app name and the position. Use a model that reads images for App snapshots.
 
-## 5. How the agent finds your code
-
-Each annotation tells the agent where to look, so it doesn't have to search:
-
-| Field | Example | Where it comes from |
-|---|---|---|
-| `source` | `src/pages/index.astro:58` | The file and line that rendered the element |
-| `css` | `src/styles/global.css:1431 .shop-tag` | Up to 4 CSS rules that style the element, with line numbers |
-| `element_text` | `Open Sat & Sun` | The element's visible text, used when there's no `source` |
-| `selector` | `div.shop-tag` | A CSS selector for the element |
-
-`source` works automatically in development mode for:
-- **Astro:** reads the tags the Astro dev server adds.
-- **Vue**, **Svelte**, and **React 18 or older**.
-
-For **React 19** or the most reliable mapping in React, add the included Babel plugin (development only):
-
-```js
-// vite.config.js
-import react from '@vitejs/plugin-react';
-export default defineConfig(({ mode }) => ({
-  plugins: [react({ babel: { plugins: mode === 'development' ? ['ANNOTATE_DIR/packages/annotate-mcp/src/babel-plugin.cjs'] : [] } })],
-}));
-```
-
-Every HTML element then gets a `data-source="src/components/Hero.tsx:12"` attribute in development.
-
-## 6. Saving tokens
+## 6. Saving Tokens
 
 A round costs two things: your comments, and the conversation the agent resends on every turn.
 Annotate keeps both small.
@@ -301,7 +529,7 @@ Set these in the `env` block of the MCP server config:
 { "newSession": true }
 ```
 Each round then costs about the same small amount, because the conversation doesn't grow. The new session gets a one-line
-summary of the last few rounds, so "undo that" still works. The work happens in the new session, not the chat you're looking at.
+summary of the last few rounds, so "undo that" still works. The new session gets a one-line summary of the last few rounds, so "undo that" still works. The work happens in the new session, not the chat you're looking at.
 
 ## 8. Troubleshooting
 
@@ -317,30 +545,6 @@ summary of the last few rounds, so "undo that" still works. The work happens in 
 | **Choose window** shows nothing or a black frame | macOS: give the browser Screen Recording permission and restart it. Linux: make sure `xdg-desktop-portal` is running |
 | The agent says it "can't see your screen" | It doesn't need to. Annotations include the element, its text, file and CSS. A screenshot is attached for layout problems |
 | See open work | `.annotate/ANNOTATIONS.md` lists every unresolved comment |
-
-## 9. How it works
-
-```
-packages/
-  browser-core/     one shared browser (Chrome DevTools Protocol), control lock, security token
-  annotate-mcp/     MCP server with 5 tools, the injected toolbar, the App page, and the Babel plugin
-  opencode-plugin/  delivers batches into fresh OpenCode sessions
-skills/annotate/    instructions for the agent
-```
-
-- **browser-core** starts one background process per user. It runs your browser with remote debugging, listening only on
-  `127.0.0.1`. Its control API needs a random token, stored in `~/.browser-core/session.json`. Other tools can share the same window.
-  Closing the browser stops the process, and the next `open` restarts it.
-- **The toolbar** is injected into every page and runs in a closed shadow root, so your site's CSS can't affect it and it can't affect your site.
-  It works on pages with strict security policies (Trusted Types).
-- **The 5 tools:** `open`, `open_app`, `wait_for_feedback`, `get_annotation_details`, `resolve_annotation`.
-- **The App page** is served by the MCP server on `127.0.0.1` behind a random token. Frames never leave your machine except
-  as the small crops (and, if the agent asks, the full frame) sent to your agent.
-- **The queue** lives in your project at `.annotate/`: `queue.json`, a readable `ANNOTATIONS.md`, `history.json` (the last 5 rounds),
-  `shots/`, `push.log`, `push.alive` (the plugin's heartbeat) and `session.json` (the chat that gets new batches). Add `.annotate/` to your `.gitignore`.
-- **The OpenCode plugin** checks the queue once a second, which costs no tokens. When a batch hasn't been picked up within about a second,
-  it queues a short message in the chat that last called an Annotate tool (or, with `newSession: true`, in a new session titled
-  `Annotate: <first comment>`). It never interrupts a running turn.
 
 ## License
 
